@@ -1,0 +1,435 @@
+"""Generate validation signals from deterministic event combinations.
+
+Signals are not trading orders. They are structured hypotheses that can be
+saved, reviewed, and later evaluated by the paper-trade simulator.
+"""
+
+from datetime import datetime, time
+
+from config import (
+    SIGNAL_FOCUS_TIME_WINDOWS,
+    SIGNAL_FOCUS_WINDOW_BONUS,
+    SIGNAL_NON_FOCUS_WINDOW_PENALTY,
+    SIGNAL_WEAK_TIME_WINDOWS,
+    SIGNAL_WEAK_WINDOW_EXTRA_PENALTY,
+    SIGNAL_MARKET_FLOW_RISK_PENALTY,
+)
+from signal_quality import apply_quality_tuning, pullback_stop_loss
+
+
+def generate_validation_signal(summary, settings=None):
+    """Return a watch/avoid signal when events form a meaningful setup."""
+    events = summary.get("events") or []
+
+    if not events:
+        return None
+
+    primary = _get_primary_timeframe(summary)
+    latest = primary.get("latest", {})
+    box_range = primary.get("box_range") or {}
+
+    current_price = _to_float(latest.get("close"))
+    box_high = _to_float(box_range.get("box_high"))
+    box_low = _to_float(box_range.get("box_low"))
+    event_types = set(event.get("type") for event in events)
+    trend_state = _summarize_trend_state(summary)
+
+    action_hint = "OBSERVE_EVENT"
+    confidence_score = 50
+    risk_level = "medium"
+    reasons = []
+
+    if "RSI_OVERSOLD" in event_types and "NEAR_BOX_LOW" in event_types:
+        action_hint = "WATCH_REBOUND"
+        confidence_score += 20
+        risk_level = "medium"
+        reasons.append("RSI oversold and price is near the lower box area.")
+
+    if "NEAR_BOX_LOW" in event_types and "ORDERBOOK_BID_IMBALANCE" in event_types:
+        action_hint = "WATCH_REBOUND"
+        confidence_score += 18
+        risk_level = "medium"
+        reasons.append("Lower-box location with bid-side orderbook support can become a rebound setup.")
+
+    if "NEAR_VWAP_SUPPORT" in event_types and "ORDERBOOK_BID_IMBALANCE" in event_types:
+        action_hint = "WATCH_PULLBACK"
+        confidence_score += 18
+        risk_level = "medium"
+        reasons.append("VWAP support with bid-side imbalance can become a pullback continuation setup.")
+
+    if "VOLUME_SPIKE" in event_types and "NEAR_BOX_HIGH" in event_types:
+        action_hint = "WATCH_BREAKOUT"
+        confidence_score += 25
+        risk_level = "high"
+        reasons.append("Volume spike near the upper box area can become a breakout or a false breakout.")
+
+    if "RSI_OVERBOUGHT" in event_types and "NEAR_BOX_HIGH" in event_types:
+        action_hint = "AVOID_CHASE"
+        confidence_score += 15
+        risk_level = "high"
+        reasons.append("RSI overbought near the upper box raises chase-buying risk.")
+
+    if "NEAR_BOX_HIGH" in event_types and "VOLUME_SPIKE" not in event_types:
+        action_hint = "AVOID_CHASE"
+        confidence_score += 10
+        risk_level = "high"
+        reasons.append("Price is near the upper box without confirmed volume expansion.")
+
+    if "MA5_MA20_GOLDEN_CROSS" in event_types:
+        confidence_score += 5
+        reasons.append("MA5 crossed above MA20.")
+
+    if "MA5_MA20_DEAD_CROSS" in event_types:
+        confidence_score += 5
+        if risk_level == "medium":
+            risk_level = "high"
+        reasons.append("MA5 crossed below MA20.")
+
+    if "NEAR_VWAP_SUPPORT" in event_types:
+        confidence_score += 5
+        if action_hint == "OBSERVE_EVENT":
+            action_hint = "WATCH_SUPPORT"
+        reasons.append("Price is close to VWAP support.")
+
+    if "NEAR_VWAP_RESISTANCE" in event_types:
+        risk_level = "high" if risk_level == "medium" else risk_level
+        if action_hint == "OBSERVE_EVENT":
+            action_hint = "WATCH_RESISTANCE"
+        reasons.append("Price is close to VWAP resistance.")
+
+    if "ORDERBOOK_BID_IMBALANCE" in event_types:
+        confidence_score += 5
+        reasons.append("Bid-side orderbook imbalance supports short-term demand.")
+
+    if "ORDERBOOK_ASK_IMBALANCE" in event_types:
+        risk_level = "high"
+        if action_hint in ("OBSERVE_EVENT", "WATCH_SUPPORT", "WATCH_PULLBACK"):
+            action_hint = "AVOID_SUPPLY"
+        reasons.append("Ask-side orderbook imbalance adds short-term supply risk.")
+
+    if "CONSECUTIVE_UP_BARS" in event_types:
+        confidence_score += 5
+        if action_hint == "OBSERVE_EVENT":
+            action_hint = "WATCH_MOMENTUM"
+        reasons.append("Recent closes are rising consecutively.")
+
+    if "CONSECUTIVE_DOWN_BARS" in event_types:
+        confidence_score += 5
+        if action_hint == "OBSERVE_EVENT":
+            action_hint = "WATCH_PULLBACK"
+        reasons.append("Recent closes are falling consecutively.")
+
+    if "MARKET_SIDECAR_ACTIVE" in event_types:
+        sidecar_direction = _market_sidecar_direction(summary)
+        risk_level = "high"
+        reasons.append("Market sidecar state requires broader market-risk adjustment.")
+
+        if sidecar_direction == "sell":
+            confidence_score -= 20
+            if action_hint.startswith("WATCH_"):
+                action_hint = "AVOID_MARKET_RISK"
+            reasons.append(
+                "Sell-side sidecar sharply reduces reliability of fresh long and rebound signals."
+            )
+        elif sidecar_direction == "buy":
+            confidence_score -= 5
+            reasons.append("Buy-side sidecar can be program-driven; avoid automatic rebound chasing.")
+        else:
+            confidence_score -= 10
+
+    if "MARKET_SIDECAR_RECENT" in event_types:
+        sidecar_direction = _market_sidecar_direction(summary)
+        risk_level = "high"
+        confidence_score -= 8
+        reasons.append("A market sidecar occurred earlier today, so keep a session-level risk penalty.")
+
+        if sidecar_direction == "sell" and action_hint in ("WATCH_REBOUND", "WATCH_BREAKOUT", "WATCH_SUPPORT"):
+            confidence_score -= 7
+            reasons.append("Recent sell-side sidecar weakens early rebound and breakout reliability.")
+
+    if "MARKET_CIRCUIT_BREAKER_ACTIVE" in event_types or "MARKET_VI_ACTIVE" in event_types:
+        action_hint = "AVOID_MARKET_RISK"
+        confidence_score += 20
+        risk_level = "high"
+        reasons.append("Market-wide interruption state makes normal signal reliability lower.")
+
+    if "MARKET_FOREIGN_SELL_PRESSURE" in event_types:
+        penalty = _setting(
+            settings,
+            "SIGNAL_MARKET_FLOW_RISK_PENALTY",
+            SIGNAL_MARKET_FLOW_RISK_PENALTY
+        )
+        confidence_score -= _to_float(penalty) or 0
+        risk_level = "high"
+        reasons.append(
+            "Market-wide foreign selling, program selling, and weak ETFs require a conservative discount."
+        )
+
+    if event_types == {"ORDERBOOK_BID_IMBALANCE"}:
+        confidence_score = min(confidence_score, 45)
+        risk_level = "medium"
+        reasons.append("Bid-side orderbook imbalance alone is not enough for a long setup.")
+
+    if trend_state["bearish_timeframes"] >= 2:
+        confidence_score -= 15
+        risk_level = "high"
+        reasons.append(
+            "At least two timeframes are bearish, so rebound/support signals need confirmation."
+        )
+
+        if action_hint in (
+            "OBSERVE_EVENT",
+            "WATCH_REBOUND",
+            "WATCH_PULLBACK",
+            "WATCH_SUPPORT",
+            "WATCH_RESISTANCE",
+            "WATCH_MOMENTUM",
+        ):
+            action_hint = "AVOID_DOWNTREND"
+
+    if trend_state["below_vwap_timeframes"] >= 2 and trend_state["primary_consecutive_down"] >= 3:
+        confidence_score -= 10
+        risk_level = "high"
+        reasons.append("Price is below VWAP on multiple timeframes with consecutive down bars.")
+
+    if trend_state["bearish_timeframes"] >= 3:
+        confidence_score = min(confidence_score, 45)
+        reasons.append("All tracked timeframes are bearish; wait for trend reversal evidence.")
+
+    action_hint, confidence_score, risk_level, reasons = apply_quality_tuning(
+        summary=summary,
+        event_types=event_types,
+        action_hint=action_hint,
+        confidence_score=confidence_score,
+        risk_level=risk_level,
+        reasons=reasons,
+    )
+
+    confidence_score, reasons = _apply_time_window_adjustment(
+        summary=summary,
+        action_hint=action_hint,
+        confidence_score=confidence_score,
+        reasons=reasons,
+        settings=settings,
+    )
+
+    if not reasons:
+        reasons.append("Event detected, but no strong validation pattern yet.")
+
+    confidence_score = min(max(confidence_score, 0), 100)
+
+    # Price levels are rough validation anchors, not executable order prices.
+    stop_loss = _default_stop_loss(current_price, box_low)
+    target_1 = _default_target_1(current_price, box_high)
+    target_2 = _default_target_2(current_price, box_high)
+
+    if action_hint == "WATCH_PULLBACK":
+        stop_loss = pullback_stop_loss(current_price, stop_loss)
+
+    return {
+        "action_hint": action_hint,
+        "confidence_score": confidence_score,
+        "risk_level": risk_level,
+        "current_price": current_price,
+        "stop_loss": stop_loss,
+        "target_1": target_1,
+        "target_2": target_2,
+        "reasons": reasons,
+    }
+
+def _apply_time_window_adjustment(summary, action_hint, confidence_score, reasons, settings=None):
+    """Apply conservative intraday score nudges without changing GPT call rules."""
+    if not action_hint or not action_hint.startswith("WATCH_"):
+        return confidence_score, reasons
+
+    detected_time = _extract_detected_time(summary.get("detected_at"))
+
+    if detected_time is None:
+        return confidence_score, reasons
+
+    settings = settings or {}
+    focus_windows = settings.get("SIGNAL_FOCUS_TIME_WINDOWS", SIGNAL_FOCUS_TIME_WINDOWS)
+    weak_windows = settings.get("SIGNAL_WEAK_TIME_WINDOWS", SIGNAL_WEAK_TIME_WINDOWS)
+    focus_bonus = settings.get("SIGNAL_FOCUS_WINDOW_BONUS", SIGNAL_FOCUS_WINDOW_BONUS)
+    non_focus_penalty = settings.get("SIGNAL_NON_FOCUS_WINDOW_PENALTY", SIGNAL_NON_FOCUS_WINDOW_PENALTY)
+    weak_penalty = settings.get("SIGNAL_WEAK_WINDOW_EXTRA_PENALTY", SIGNAL_WEAK_WINDOW_EXTRA_PENALTY)
+
+    in_focus = _time_in_windows(detected_time, focus_windows)
+    in_weak = _time_in_windows(detected_time, weak_windows)
+
+    if in_focus:
+        confidence_score += _to_float(focus_bonus) or 0
+        reasons.append("Signal occurred inside a preferred monitoring window.")
+    else:
+        confidence_score -= _to_float(non_focus_penalty) or 0
+        reasons.append("Signal occurred outside the preferred monitoring windows.")
+
+    if in_weak:
+        confidence_score -= _to_float(weak_penalty) or 0
+        reasons.append("This time window has weaker recent validation, so apply extra caution.")
+
+    return confidence_score, reasons
+
+
+def _extract_detected_time(value):
+    if not value:
+        return None
+
+    if isinstance(value, datetime):
+        return value.time()
+
+    text = str(value).strip()
+
+    for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%H:%M:%S", "%H:%M"):
+        try:
+            return datetime.strptime(text, fmt).time()
+        except ValueError:
+            continue
+
+    return None
+
+
+def _time_in_windows(value, windows):
+    for window in windows or []:
+        start, end = _parse_time_window(window)
+        if start is None or end is None:
+            continue
+
+        if start <= end and start <= value < end:
+            return True
+        if start > end and (value >= start or value < end):
+            return True
+
+    return False
+
+
+def _parse_time_window(window):
+    try:
+        start_text, end_text = str(window).split("-", 1)
+        return _parse_clock(start_text), _parse_clock(end_text)
+    except ValueError:
+        return None, None
+
+
+def _parse_clock(value):
+    try:
+        hour_text, minute_text = str(value).strip().split(":", 1)
+        return time(int(hour_text), int(minute_text))
+    except (TypeError, ValueError):
+        return None
+
+
+def _get_primary_timeframe(summary):
+    """Use 1m as the signal source when multi-timeframe data is present."""
+    timeframes = summary.get("timeframes") or {}
+
+    if timeframes.get("1m"):
+        return timeframes["1m"]
+
+    for timeframe_summary in timeframes.values():
+        return timeframe_summary
+
+    return summary
+
+
+def _summarize_trend_state(summary):
+    """Return compact multi-timeframe trend state for signal risk adjustment."""
+    timeframes = summary.get("timeframes") or {}
+    bearish_timeframes = 0
+    below_vwap_timeframes = 0
+    primary_consecutive_down = 0
+
+    for label in ("1m", "3m", "5m"):
+        timeframe = timeframes.get(label) or {}
+        latest = timeframe.get("latest") or {}
+        moving_average = timeframe.get("moving_average") or {}
+        vwap = timeframe.get("vwap") or {}
+        trend = timeframe.get("trend") or {}
+
+        return_1bar = _to_float(latest.get("return_1bar_pct"))
+        consecutive_down = _to_float(trend.get("consecutive_down_bars")) or 0
+        bearish_votes = 0
+
+        if return_1bar is not None and return_1bar < 0:
+            bearish_votes += 1
+        if moving_average.get("price_above_ma5") is False:
+            bearish_votes += 1
+        if moving_average.get("price_above_ma20") is False:
+            bearish_votes += 1
+        if vwap.get("price_above_vwap") is False:
+            bearish_votes += 1
+            below_vwap_timeframes += 1
+        if consecutive_down >= 3:
+            bearish_votes += 1
+
+        if bearish_votes >= 3:
+            bearish_timeframes += 1
+
+        if label == "1m":
+            primary_consecutive_down = int(consecutive_down)
+
+    return {
+        "bearish_timeframes": bearish_timeframes,
+        "below_vwap_timeframes": below_vwap_timeframes,
+        "primary_consecutive_down": primary_consecutive_down,
+    }
+
+
+def _market_sidecar_direction(summary):
+    """Read the current market-wide sidecar direction from GPT context."""
+    market_context = summary.get("market_context") or {}
+    market_status = market_context.get("market_status") or {}
+    direction = market_status.get("sidecar_direction")
+    if direction is None:
+        return None
+    return str(direction).strip().lower()
+
+
+def _default_stop_loss(current_price, box_low):
+    """Prefer lower box as stop; otherwise use a simple fallback percent."""
+    if current_price is None:
+        return None
+
+    if box_low is not None and box_low < current_price:
+        return round(box_low, 2)
+
+    return round(current_price * 0.985, 2)
+
+
+def _default_target_1(current_price, box_high):
+    """Prefer upper box as first target; otherwise use a simple fallback percent."""
+    if current_price is None:
+        return None
+
+    if box_high is not None and box_high > current_price:
+        return round(box_high, 2)
+
+    return round(current_price * 1.015, 2)
+
+
+def _default_target_2(current_price, box_high):
+    """Project a second target beyond the box or use a fallback percent."""
+    if current_price is None:
+        return None
+
+    if box_high is not None and box_high > current_price:
+        return round(box_high + (box_high - current_price), 2)
+
+    return round(current_price * 1.03, 2)
+
+
+def _to_float(value):
+    """Best-effort numeric conversion for indicator values."""
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _setting(settings, key, default):
+    """Read a runtime setting while preserving the config default."""
+    if not settings:
+        return default
+    return settings.get(key, default)

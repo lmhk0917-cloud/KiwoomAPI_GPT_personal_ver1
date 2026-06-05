@@ -1,0 +1,61 @@
+{
+  "global": {
+    "asof": "2026-05-21 09:30:00",
+    "market_status": {
+      "market": "KOSPI",
+      "market_phase": "regular",
+      "sidecar_status": "inactive",
+      "circuit_breaker_status": "inactive",
+      "summary": "No abnormal market-wide interruption state is currently recorded.",
+      "source": "manual",
+      "reliability": "manual_or_unverified"
+    },
+    "news": {
+      "summary": "Market-wide news summary placeholder.",
+      "sentiment": "neutral",
+      "source_count": 0,
+      "items": [],
+      "source": "manual",
+      "reliability": "manual_or_unverified"
+    },
+    "public_reaction": {
+      "summary": "Public reaction placeholder. Use only as very low-weight context.",
+      "sentiment": "mixed",
+      "source_count": 0,
+      "dominant_topics": [],
+      "sample_size": 0,
+      "weight": "very_low",
+      "source": "manual",
+      "reliability": "low"
+    }
+  },
+  "codes": {
+    "005930": {
+      "news": {
+        "summary": "Samsung Electronics company-specific news summary placeholder.",
+        "sentiment": "neutral",
+        "source_count": 0,
+        "items": [],
+        "source": "manual",
+        "reliability": "manual_or_unverified"
+      },
+      "disclosures": {
+        "summary": "No material disclosure is recorded in this placeholder.",
+        "materiality": "none",
+        "items": [],
+        "source": "manual",
+        "reliability": "manual_or_unverified"
+      },
+      "public_reaction": {
+        "summary": "Retail-community reaction placeholder. Treat as low reliability.",
+        "sentiment": "mixed",
+        "source_count": 0,
+        "dominant_topics": [],
+        "sample_size": 0,
+        "weight": "very_low",
+        "source": "manual",
+        "reliability": "low"
+      }
+    }
+  }
+}

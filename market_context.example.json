@@ -1,0 +1,78 @@
+{
+  "global": {
+    "asof": "2026-05-21 09:30:00",
+    "market_status": {
+      "asof": "2026-05-21 09:30:00",
+      "market": "KOSPI",
+      "sidecar_status": "inactive",
+      "sidecar_direction": null,
+      "sidecar_started_at": null,
+      "sidecar_ended_at": null,
+      "circuit_breaker_status": "inactive",
+      "vi_status": "inactive",
+      "market_phase": "regular",
+      "summary": "No abnormal market-wide interruption state is currently recorded.",
+      "source": "manual",
+      "reliability": "manual_or_unverified"
+    },
+    "market_indices": {
+      "kospi": null,
+      "kospi_change_pct": null,
+      "kosdaq": null,
+      "kosdaq_change_pct": null,
+      "kospi200": null,
+      "kospi200_change_pct": null,
+      "usd_krw": null,
+      "usd_krw_change_pct": null
+    },
+    "derivatives": {
+      "kospi200_futures_price": null,
+      "kospi200_futures_change_pct": null,
+      "basis": null,
+      "foreign_futures_net_contracts": null,
+      "institution_futures_net_contracts": null,
+      "put_call_ratio": null,
+      "implied_volatility": null
+    },
+    "program_trading": {
+      "program_net_value": null,
+      "program_buy_value": null,
+      "program_sell_value": null,
+      "foreign_net_value": null,
+      "institution_net_value": null
+    }
+  },
+  "codes": {
+    "005930": {
+      "sector_context": {
+        "sector_name": "Semiconductor",
+        "sector_index": null,
+        "sector_change_pct": null,
+        "relative_strength_vs_sector_pct": null,
+        "peer_movers": []
+      },
+      "news": {
+        "asof": null,
+        "summary": null,
+        "sentiment": null,
+        "source_count": null,
+        "items": []
+      },
+      "disclosures": {
+        "asof": null,
+        "summary": null,
+        "materiality": null,
+        "items": []
+      },
+      "public_reaction": {
+        "asof": null,
+        "summary": null,
+        "sentiment": null,
+        "source_count": null,
+        "dominant_topics": [],
+        "sample_size": null,
+        "weight": "very_low"
+      }
+    }
+  }
+}

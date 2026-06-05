@@ -1,0 +1,45 @@
+# Secrets / environment
+.env
+.env.*
+!.env.example
+*token*
+*secret*
+*credential*
+
+# Databases
+*.db
+*.sqlite
+*.sqlite3
+data/
+*.db-shm
+*.db-wal
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# PyCharm settings
+.idea/
+
+# Log files
+*.log
+logs/
+exports/
+
+# Runtime/local state
+market_context.json
+openapi_bootstrap.disabled
+archive/
+codex_new_chat_prompt_*.md
+PERSONAL_INVESTMENT_DATA_HANDOFF.md
+CLEANUP_*.md
+PROJECT_STRUCTURE_PLAN_*.md
+
+# OS/editor temporary files
+Thumbs.db
+Desktop.ini
+*.tmp
+*.bak
+~$*
