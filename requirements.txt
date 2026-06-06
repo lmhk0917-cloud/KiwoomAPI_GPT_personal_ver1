@@ -1,0 +1,6 @@
+openai
+numpy
+pandas
+PyQt5
+python-dotenv
+requests

@@ -35,6 +35,7 @@ def main():
 
     run_compile_check()
     run_script(["preflight_check.py"])
+    run_script(["tests/test_signal_logic.py"])
     run_script([
         "simulate_debug.py",
         "--db", SIM_DB,

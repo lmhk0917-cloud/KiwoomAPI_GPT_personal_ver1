@@ -1,0 +1,17 @@
+# Kiwoom OpenAPI+ requires a 32-bit Windows Python/Conda environment.
+# Create this from a 32-bit Anaconda installation, then install Kiwoom OpenAPI+
+# separately through the official Windows installer.
+name: py37_32
+channels:
+  - defaults
+  - conda-forge
+dependencies:
+  - python=3.7
+  - pip
+  - numpy
+  - pandas
+  - pyqt=5
+  - pip:
+      - openai
+      - python-dotenv
+      - requests
