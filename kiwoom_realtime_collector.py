@@ -14,7 +14,7 @@ import sys
 from datetime import datetime
 
 from PyQt5.QtCore import QTimer
-from PyQt5.QtWidgets import QApplication
+from PyQt5.QtWidgets import QApplication, QWidget
 from PyQt5.QAxContainer import QAxWidget
 
 from app_paths import DEFAULT_DB_PATH, setup_runtime_logging
@@ -51,12 +51,22 @@ class KiwoomRealtimeCollector:
         self.login_timer = None
         self.finish_timer = None
 
-        self.ocx = QAxWidget("KHOPENAPI.KHOpenAPICtrl.1")
+        # Kiwoom OpenAPI+ can fail with a "no handle" style popup when the
+        # ActiveX control is created without a real parent window handle.
+        self.container = QWidget()
+        self.container.setWindowTitle("Kiwoom OpenAPI Collector")
+        self.container.resize(320, 120)
+        self.container.winId()
+
+        self.ocx = QAxWidget(self.container)
+        self.ocx.setControl("KHOPENAPI.KHOpenAPICtrl.1")
         if self.ocx.isNull():
             print("COLLECTOR_OCX_STATUS=failed")
             print("COLLECTOR_ERROR=KHOPENAPI.KHOpenAPICtrl.1 could not be created")
             QTimer.singleShot(0, QApplication.instance().quit)
             return
+
+        self.container.showMinimized()
 
         print("COLLECTOR_OCX_STATUS=created")
         connect_state = self.ocx.dynamicCall("GetConnectState()")
@@ -285,6 +295,7 @@ def main():
     print("COLLECTOR_DURATION_SECONDS={}".format(duration_seconds))
 
     app = QApplication(sys.argv)
+    app.setQuitOnLastWindowClosed(False)
     store = TickStore(db_path=DEFAULT_DB_PATH)
     collector = KiwoomRealtimeCollector(
         store=store,

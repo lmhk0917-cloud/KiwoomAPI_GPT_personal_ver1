@@ -12,4 +12,4 @@ $env:QT_QPA_PLATFORM = "windows"
   --no-tick-skip-after 09:10 `
   --retry-delay-sec 120 `
   --login-timeout-sec 45 `
-  --attempt-seconds 300
+  --attempt-seconds 0

@@ -123,7 +123,15 @@ def parse_args():
     parser.add_argument("--until", default="15:31", help="Local HH:MM stop time.")
     parser.add_argument("--retry-delay-sec", type=int, default=120)
     parser.add_argument("--login-timeout-sec", type=int, default=45)
-    parser.add_argument("--attempt-seconds", type=int, default=300)
+    parser.add_argument(
+        "--attempt-seconds",
+        type=int,
+        default=0,
+        help=(
+            "Collector run length per successful login. "
+            "Use 0 to keep one collector alive until market close."
+        ),
+    )
     parser.add_argument("--allow-existing-kiwoom", action="store_true")
     parser.add_argument("--market-open", default="09:00", help="Local HH:MM before which collector attempts wait.")
     parser.add_argument(
@@ -171,7 +179,13 @@ def main():
             time.sleep(min(args.retry_delay_sec, max(10, remaining)))
             continue
 
-        run_seconds = min(args.attempt_seconds, max(30, remaining - 30))
+        session_seconds = max(30, remaining - 30)
+        if args.attempt_seconds and args.attempt_seconds > 0:
+            run_seconds = min(args.attempt_seconds, session_seconds)
+        else:
+            run_seconds = session_seconds
+
+        print("SUPERVISOR_COLLECTOR_RUN_SECONDS={}".format(run_seconds))
         attempt += 1
         before = count_rows(DEFAULT_DB_PATH)
         print_counts("SUPERVISOR_DB_BEFORE_ATTEMPT_{}".format(attempt), before)
