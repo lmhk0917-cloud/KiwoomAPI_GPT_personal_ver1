@@ -112,6 +112,11 @@ def fetch_overview(conn, where_sql, params):
         SELECT
             COUNT(1) AS signal_count,
             COALESCE(SUM(CASE WHEN r.id IS NOT NULL THEN 1 ELSE 0 END), 0) AS evaluated_count,
+            COALESCE(SUM(CASE WHEN r.return_5m_pct IS NOT NULL THEN 1 ELSE 0 END), 0) AS evaluated_5m_count,
+            COALESCE(SUM(CASE WHEN r.return_10m_pct IS NOT NULL THEN 1 ELSE 0 END), 0) AS evaluated_10m_count,
+            COALESCE(SUM(CASE WHEN r.return_30m_pct IS NOT NULL THEN 1 ELSE 0 END), 0) AS evaluated_30m_count,
+            COALESCE(SUM(CASE WHEN r.return_60m_pct IS NOT NULL THEN 1 ELSE 0 END), 0) AS evaluated_60m_count,
+            COALESCE(SUM(CASE WHEN r.id IS NOT NULL AND r.return_60m_pct IS NULL THEN 1 ELSE 0 END), 0) AS partial_evaluated_count,
             COALESCE(SUM(CASE WHEN r.id IS NULL THEN 1 ELSE 0 END), 0) AS pending_count,
             MIN(s.detected_at) AS first_signal_at,
             MAX(s.detected_at) AS latest_signal_at,
@@ -151,6 +156,11 @@ def fetch_group_rows(conn, group_expr, where_sql, params):
             {group_expr} AS group_name,
             COUNT(1) AS signal_count,
             COALESCE(SUM(CASE WHEN r.id IS NOT NULL THEN 1 ELSE 0 END), 0) AS evaluated_count,
+            COALESCE(SUM(CASE WHEN r.return_5m_pct IS NOT NULL THEN 1 ELSE 0 END), 0) AS evaluated_5m_count,
+            COALESCE(SUM(CASE WHEN r.return_10m_pct IS NOT NULL THEN 1 ELSE 0 END), 0) AS evaluated_10m_count,
+            COALESCE(SUM(CASE WHEN r.return_30m_pct IS NOT NULL THEN 1 ELSE 0 END), 0) AS evaluated_30m_count,
+            COALESCE(SUM(CASE WHEN r.return_60m_pct IS NOT NULL THEN 1 ELSE 0 END), 0) AS evaluated_60m_count,
+            COALESCE(SUM(CASE WHEN r.id IS NOT NULL AND r.return_60m_pct IS NULL THEN 1 ELSE 0 END), 0) AS partial_evaluated_count,
             COALESCE(SUM(CASE WHEN r.id IS NULL THEN 1 ELSE 0 END), 0) AS pending_count,
             ROUND(AVG(s.confidence_score), 2) AS avg_confidence_score,
             ROUND(AVG(r.return_5m_pct), 3) AS avg_return_5m_pct,
@@ -274,7 +284,7 @@ def annotate_rows(rows, min_sample):
 
 
 def quality_label(row, min_sample):
-    evaluated = row.get("evaluated_count") or 0
+    evaluated = row.get("evaluated_60m_count") or 0
     directional_60m = row.get("directional_success_60m_pct")
     avg_60m = row.get("avg_return_60m_pct")
     stop_hit = row.get("stop_loss_hit_rate_pct")
@@ -330,13 +340,19 @@ def print_text_report(report):
 
     print("[Overview]")
     print(
-        "signals={signals}, evaluated={evaluated}, pending={pending}, "
+        "signals={signals}, evaluated={evaluated}, pending={pending}, partial={partial}, "
+        "eval_5/10/30/60m={eval5}/{eval10}/{eval30}/{eval60}, "
         "avg_30m={avg30}, avg_60m={avg60}, win_60m={win60}, "
         "directional_60m={directional60}, stop_hit={stop}"
         .format(
             signals=overview.get("signal_count"),
             evaluated=overview.get("evaluated_count"),
             pending=overview.get("pending_count"),
+            partial=overview.get("partial_evaluated_count"),
+            eval5=overview.get("evaluated_5m_count"),
+            eval10=overview.get("evaluated_10m_count"),
+            eval30=overview.get("evaluated_30m_count"),
+            eval60=overview.get("evaluated_60m_count"),
             avg30=overview.get("avg_return_30m_pct"),
             avg60=overview.get("avg_return_60m_pct"),
             win60=overview.get("win_rate_60m_pct"),
@@ -393,13 +409,15 @@ def print_group_rows(rows):
 
     for item in rows:
         print(
-            "  {name}: signals={signals}, eval={evaluated}, avg60={avg60}, "
+            "  {name}: signals={signals}, eval={evaluated}, eval60={eval60}, partial={partial}, avg60={avg60}, "
             "win60={win60}, directional60={directional60}, stop={stop}, "
             "label={label}, hint={hint}"
             .format(
                 name=item.get("group_name"),
                 signals=item.get("signal_count"),
                 evaluated=item.get("evaluated_count"),
+                eval60=item.get("evaluated_60m_count"),
+                partial=item.get("partial_evaluated_count"),
                 avg60=item.get("avg_return_60m_pct"),
                 win60=item.get("win_rate_60m_pct"),
                 directional60=item.get("directional_success_60m_pct"),

@@ -39,6 +39,11 @@ def main():
     parser.add_argument("--limit", type=int, default=100)
     parser.add_argument("--code", help="Optional stock code filter")
     parser.add_argument("--since", help="Only evaluate signals detected at or after this timestamp")
+    parser.add_argument(
+        "--allow-partial",
+        action="store_true",
+        help="Save evaluations when at least one horizon is complete. Use after market close.",
+    )
     args = parser.parse_args()
 
     store = TickStore(db_path=args.db)
@@ -46,7 +51,7 @@ def main():
 
     evaluated = 0
     for signal in signals:
-        result = evaluate_signal(store, signal)
+        result = evaluate_signal(store, signal, allow_partial=args.allow_partial)
         if result:
             store.save_paper_trade_result(result)
             evaluated += 1
@@ -91,7 +96,7 @@ def fetch_pending_signals(store, limit=100, code=None, since=None):
     return store.conn.execute(sql, params).fetchall()
 
 
-def evaluate_signal(store, signal):
+def evaluate_signal(store, signal, allow_partial=False):
     """Evaluate future returns after one signal when enough tick data exists."""
     entry_time = parse_dt(signal["detected_at"])
     entry_price = _to_float(signal["current_price"])
@@ -102,14 +107,31 @@ def evaluate_signal(store, signal):
     end_time = entry_time + timedelta(minutes=max(HORIZONS_MIN))
     fetch_end_time = end_time + timedelta(minutes=COMPLETION_GRACE_MINUTES)
     last_tick_time = fetch_last_tick_time(store, signal["code"], entry_time, fetch_end_time)
-    if not last_tick_time or last_tick_time < end_time:
+    if not last_tick_time:
         return None
 
-    stats_30m = fetch_price_stats(store, signal["code"], entry_time, entry_time + timedelta(minutes=30))
-    stats_60m = fetch_price_stats(store, signal["code"], entry_time, end_time)
-
-    if not stats_60m or stats_60m["max_price"] is None or stats_60m["min_price"] is None:
+    completed_horizons = [
+        minutes for minutes in HORIZONS_MIN
+        if last_tick_time >= entry_time + timedelta(minutes=minutes)
+    ]
+    if not completed_horizons:
         return None
+    if not allow_partial and max(completed_horizons) < max(HORIZONS_MIN):
+        return None
+
+    evaluation_minutes = max(completed_horizons)
+    evaluation_end_time = entry_time + timedelta(minutes=evaluation_minutes)
+    stats_eval = fetch_price_stats(store, signal["code"], entry_time, evaluation_end_time)
+
+    if not stats_eval or stats_eval["max_price"] is None or stats_eval["min_price"] is None:
+        return None
+
+    stats_30m = None
+    stats_60m = None
+    if 30 in completed_horizons:
+        stats_30m = fetch_price_stats(store, signal["code"], entry_time, entry_time + timedelta(minutes=30))
+    if 60 in completed_horizons:
+        stats_60m = fetch_price_stats(store, signal["code"], entry_time, end_time)
 
     result = {
         "signal_id": signal["id"],
@@ -117,16 +139,27 @@ def evaluate_signal(store, signal):
         "code": signal["code"],
         "entry_time": signal["detected_at"],
         "entry_price": entry_price,
+        "evaluation_minutes": evaluation_minutes,
+        "completed_horizons_min": completed_horizons,
+        "partial_evaluation": evaluation_minutes < max(HORIZONS_MIN),
         "max_gain_30m_pct": pct_from_entry(stats_30m["max_price"], entry_price) if stats_30m else None,
         "max_loss_30m_pct": pct_from_entry(stats_30m["min_price"], entry_price) if stats_30m else None,
-        "max_gain_60m_pct": pct_from_entry(stats_60m["max_price"], entry_price),
-        "max_loss_60m_pct": pct_from_entry(stats_60m["min_price"], entry_price),
+        "max_gain_60m_pct": pct_from_entry(stats_60m["max_price"], entry_price) if stats_60m else None,
+        "max_loss_60m_pct": pct_from_entry(stats_60m["min_price"], entry_price) if stats_60m else None,
     }
 
     for minutes in HORIZONS_MIN:
-        horizon_price = fetch_price_at_or_after(store, signal["code"], entry_time + timedelta(minutes=minutes), fetch_end_time)
         key = "return_{}m_pct".format(minutes)
-        result[key] = pct_from_entry(horizon_price, entry_price)
+        if minutes in completed_horizons:
+            horizon_price = fetch_price_at_or_after(
+                store,
+                signal["code"],
+                entry_time + timedelta(minutes=minutes),
+                fetch_end_time,
+            )
+            result[key] = pct_from_entry(horizon_price, entry_price)
+        else:
+            result[key] = None
 
     target_1 = _to_float(signal["target_1"]) if "target_1" in signal.keys() else None
     target_2 = _to_float(signal["target_2"]) if "target_2" in signal.keys() else None
@@ -135,10 +168,11 @@ def evaluate_signal(store, signal):
         store,
         signal["code"],
         entry_time,
-        end_time,
+        evaluation_end_time,
         target_1=target_1,
         target_2=target_2,
         stop_loss=stop_loss,
+        horizon_minutes=evaluation_minutes,
     )
     result.update(hit_info)
     result["decision_side"] = classify_decision_side(signal["action_hint"])
@@ -204,7 +238,16 @@ def fetch_price_at_or_after(store, code, target_time, fetch_end_time):
     return _to_float(row["price"]) if row else None
 
 
-def evaluate_levels_sql(store, code, start_time, end_time, target_1=None, target_2=None, stop_loss=None):
+def evaluate_levels_sql(
+    store,
+    code,
+    start_time,
+    end_time,
+    target_1=None,
+    target_2=None,
+    stop_loss=None,
+    horizon_minutes=60,
+):
     target_1_time = first_touch_time_sql(store, code, start_time, end_time, target_1, direction="above")
     target_2_time = first_touch_time_sql(store, code, start_time, end_time, target_2, direction="above")
     stop_time = first_touch_time_sql(store, code, start_time, end_time, stop_loss, direction="below")
@@ -224,7 +267,7 @@ def evaluate_levels_sql(store, code, start_time, end_time, target_1=None, target
     elif target_1_hit:
         outcome_label = "target_1_after_stop"
     else:
-        outcome_label = "no_level_hit_60m"
+        outcome_label = "no_level_hit_{}m".format(horizon_minutes)
 
     return {
         "target_1_hit": target_1_hit,

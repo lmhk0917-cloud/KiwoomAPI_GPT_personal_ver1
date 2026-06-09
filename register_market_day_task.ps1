@@ -1,7 +1,7 @@
 param(
   [string]$TaskName = "KiwoomGPTPersonalMarketDayIntegration",
   [string]$ProjectDir = "C:\Users\lmhk2\PycharmProjects\KiwoomAPI_GPT_personal_ver1",
-  [string]$StartTime = "08:55",
+  [string]$StartTime = "08:58",
   [string]$OpenApiTaskName = "",
   [switch]$RequireExistingLogin,
   [switch]$AllowExistingKiwoom,
