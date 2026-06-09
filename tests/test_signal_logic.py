@@ -55,6 +55,9 @@ def _summary(events, timeframes=None, market_context=None, detected_at="2026-06-
         "code": "005930",
         "name": "Samsung Electronics",
         "detected_at": detected_at,
+        "market_snapshot": {
+            "change_rate": 2.5,
+        },
         "events": [_event(event) for event in events],
         "timeframes": timeframes or {
             "1m": _timeframe(),
@@ -112,6 +115,50 @@ class SignalLogicTest(unittest.TestCase):
         self.assertEqual("OBSERVE_EVENT", signal["action_hint"])
         self.assertEqual("high", signal["risk_level"])
         self.assertLess(signal["confidence_score"], 55)
+
+    def test_risk_on_market_relabels_mild_downtrend_as_pullback(self):
+        bearish = {
+            "1m": _timeframe(return_1bar_pct=-0.2, above_ma5=False, above_ma20=False, above_vwap=False, consecutive_down_bars=3),
+            "3m": _timeframe(return_1bar_pct=-0.1, above_ma5=False, above_ma20=False, above_vwap=True, consecutive_down_bars=1),
+            "5m": _timeframe(return_1bar_pct=0.2, above_ma5=True, above_ma20=True, above_vwap=True, consecutive_down_bars=0),
+        }
+
+        signal = generate_validation_signal(
+            _summary(
+                ["CONSECUTIVE_DOWN_BARS"],
+                timeframes=bearish,
+                market_context={
+                    "market_indices": {
+                        "kospi200_change_pct": 2.0,
+                    },
+                },
+            )
+        )
+
+        self.assertEqual("WATCH_PULLBACK", signal["action_hint"])
+        self.assertEqual("medium", signal["risk_level"])
+
+    def test_risk_on_relabel_does_not_override_ask_supply(self):
+        bearish = {
+            "1m": _timeframe(return_1bar_pct=-0.2, above_ma5=False, above_ma20=False, above_vwap=False, consecutive_down_bars=3),
+            "3m": _timeframe(return_1bar_pct=-0.1, above_ma5=False, above_ma20=False, above_vwap=True, consecutive_down_bars=1),
+            "5m": _timeframe(return_1bar_pct=0.2, above_ma5=True, above_ma20=True, above_vwap=True, consecutive_down_bars=0),
+        }
+
+        signal = generate_validation_signal(
+            _summary(
+                ["CONSECUTIVE_DOWN_BARS", "ORDERBOOK_ASK_IMBALANCE"],
+                timeframes=bearish,
+                market_context={
+                    "market_indices": {
+                        "kospi200_change_pct": 2.0,
+                    },
+                },
+            )
+        )
+
+        self.assertEqual("AVOID_SUPPLY", signal["action_hint"])
+        self.assertEqual("high", signal["risk_level"])
 
 
 if __name__ == "__main__":

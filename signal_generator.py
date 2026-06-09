@@ -13,6 +13,9 @@ from config import (
     SIGNAL_WEAK_TIME_WINDOWS,
     SIGNAL_WEAK_WINDOW_EXTRA_PENALTY,
     SIGNAL_MARKET_FLOW_RISK_PENALTY,
+    ENABLE_RISK_ON_PULLBACK_RELABEL,
+    SIGNAL_RISK_ON_MIN_MARKET_CHANGE_PCT,
+    SIGNAL_RISK_ON_MIN_STOCK_CHANGE_PCT,
 )
 from signal_quality import apply_quality_tuning, pullback_stop_loss
 
@@ -196,6 +199,16 @@ def generate_validation_signal(summary, settings=None):
         confidence_score = min(confidence_score, 45)
         reasons.append("All tracked timeframes are bearish; wait for trend reversal evidence.")
 
+    action_hint, confidence_score, risk_level, reasons = _apply_risk_on_pullback_relabel(
+        summary=summary,
+        event_types=event_types,
+        action_hint=action_hint,
+        confidence_score=confidence_score,
+        risk_level=risk_level,
+        reasons=reasons,
+        settings=settings,
+    )
+
     action_hint, confidence_score, risk_level, reasons = apply_quality_tuning(
         summary=summary,
         event_types=event_types,
@@ -269,6 +282,85 @@ def _apply_time_window_adjustment(summary, action_hint, confidence_score, reason
         reasons.append("This time window has weaker recent validation, so apply extra caution.")
 
     return confidence_score, reasons
+
+
+def _apply_risk_on_pullback_relabel(
+    summary,
+    event_types,
+    action_hint,
+    confidence_score,
+    risk_level,
+    reasons,
+    settings=None,
+):
+    """Treat mild downtrend labels as pullback watch signals in strong tapes."""
+    enabled = _setting(
+        settings,
+        "ENABLE_RISK_ON_PULLBACK_RELABEL",
+        ENABLE_RISK_ON_PULLBACK_RELABEL,
+    )
+    if not enabled or action_hint != "AVOID_DOWNTREND":
+        return action_hint, confidence_score, risk_level, reasons
+
+    hard_risk_events = {
+        "MARKET_SIDECAR_ACTIVE",
+        "MARKET_CIRCUIT_BREAKER_ACTIVE",
+        "MARKET_VI_ACTIVE",
+        "MARKET_FOREIGN_SELL_PRESSURE",
+        "NEAR_BOX_HIGH",
+        "ORDERBOOK_ASK_IMBALANCE",
+    }
+    if event_types.intersection(hard_risk_events):
+        return action_hint, confidence_score, risk_level, reasons
+
+    if not _is_risk_on_pullback_context(summary, settings=settings):
+        return action_hint, confidence_score, risk_level, reasons
+
+    action_hint = "WATCH_PULLBACK"
+    risk_level = "medium"
+    confidence_score += 8
+    reasons.append(
+        "Risk-on market and positive stock tape turn the short-term downtrend into a pullback watch."
+    )
+    return action_hint, confidence_score, risk_level, reasons
+
+
+def _is_risk_on_pullback_context(summary, settings=None):
+    market_change_threshold = _to_float(_setting(
+        settings,
+        "SIGNAL_RISK_ON_MIN_MARKET_CHANGE_PCT",
+        SIGNAL_RISK_ON_MIN_MARKET_CHANGE_PCT,
+    ))
+    stock_change_threshold = _to_float(_setting(
+        settings,
+        "SIGNAL_RISK_ON_MIN_STOCK_CHANGE_PCT",
+        SIGNAL_RISK_ON_MIN_STOCK_CHANGE_PCT,
+    ))
+
+    market_snapshot = summary.get("market_snapshot") or {}
+    stock_change = _to_float(market_snapshot.get("change_rate"))
+    if stock_change is None or stock_change < stock_change_threshold:
+        return False
+
+    market_context = summary.get("market_context") or {}
+    market_indices = market_context.get("market_indices") or {}
+    index_changes = [
+        _to_float(market_indices.get("kospi200_change_pct")),
+        _to_float(market_indices.get("kospi_change_pct")),
+        _to_float(market_indices.get("kosdaq_change_pct")),
+    ]
+    if any(value is not None and value >= market_change_threshold for value in index_changes):
+        return True
+
+    benchmark_etfs = market_context.get("benchmark_etfs") or {}
+    for item in benchmark_etfs.values():
+        if not isinstance(item, dict):
+            continue
+        change = _to_float(item.get("change_rate") or item.get("change_pct"))
+        if change is not None and change >= market_change_threshold:
+            return True
+
+    return False
 
 
 def _extract_detected_time(value):

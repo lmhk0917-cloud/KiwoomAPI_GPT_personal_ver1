@@ -88,6 +88,13 @@ ENABLE_MARKET_FLOW_DIRECTION_RISK = True
 EVENT_MARKET_FLOW_REQUIRE_WEAK_ETF_COUNT = 1
 SIGNAL_MARKET_FLOW_RISK_PENALTY = 12
 
+# Risk-on sessions can make short intraday pullbacks look like downtrends.
+# This does not create orders; it only prevents deterministic validation labels
+# from becoming too defensive when the broader tape and the stock are both up.
+ENABLE_RISK_ON_PULLBACK_RELABEL = True
+SIGNAL_RISK_ON_MIN_MARKET_CHANGE_PCT = 1.0
+SIGNAL_RISK_ON_MIN_STOCK_CHANGE_PCT = 1.0
+
 # Notifications. Console is enabled by default. Telegram is filtered to reduce
 # noise when it is enabled in app settings.
 ENABLE_NOTIFICATIONS = True

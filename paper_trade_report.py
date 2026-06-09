@@ -10,8 +10,16 @@ import json
 from datetime import datetime, timedelta
 
 from app_paths import DEFAULT_DB_PATH
+import config
 from data_store import TickStore
 
+
+ROUND_TRIP_COST_PCT = (
+    config.TRADE_BUY_FEE_PCT
+    + config.TRADE_SELL_FEE_PCT
+    + config.TRADE_SELL_TAX_PCT
+    + (config.TRADE_SLIPPAGE_PCT * 2)
+)
 
 LONG_ACTIONS = (
     "WATCH_REBOUND",
@@ -67,6 +75,7 @@ def build_report(conn, code=None, days=None, min_sample=5, recent_limit=10):
 
     overview = fetch_overview(conn, where_sql, params)
     action_rows = fetch_group_rows(conn, "s.action_hint", where_sql, params)
+    decision_side_rows = fetch_group_rows(conn, decision_side_expr(), where_sql, params)
     code_rows = fetch_group_rows(conn, "s.code", where_sql, params)
     code_action_rows = fetch_group_rows(conn, "s.code || ' / ' || s.action_hint", where_sql, params)
     outcome_rows = fetch_outcomes(conn, where_sql, params)
@@ -81,6 +90,7 @@ def build_report(conn, code=None, days=None, min_sample=5, recent_limit=10):
         },
         "overview": row_to_dict(overview),
         "by_action": annotate_rows(action_rows, min_sample=min_sample),
+        "by_decision_side": annotate_rows(decision_side_rows, min_sample=min_sample),
         "by_code": annotate_rows(code_rows, min_sample=min_sample),
         "by_code_action": annotate_rows(code_action_rows, min_sample=min_sample),
         "outcomes": [row_to_dict(row) for row in outcome_rows],
@@ -126,8 +136,11 @@ def fetch_overview(conn, where_sql, params):
             ROUND(AVG(r.return_10m_pct), 3) AS avg_return_10m_pct,
             ROUND(AVG(r.return_30m_pct), 3) AS avg_return_30m_pct,
             ROUND(AVG(r.return_60m_pct), 3) AS avg_return_60m_pct,
+            ROUND(AVG(r.return_30m_pct - {cost}), 3) AS avg_net_return_30m_pct,
+            ROUND(AVG(r.return_60m_pct - {cost}), 3) AS avg_net_return_60m_pct,
             {win30} AS win_rate_30m_pct,
             {win60} AS win_rate_60m_pct,
+            {net_win60} AS net_win_rate_60m_pct,
             {directional30} AS directional_success_30m_pct,
             {directional60} AS directional_success_60m_pct,
             {target1} AS target_1_hit_rate_pct,
@@ -140,11 +153,16 @@ def fetch_overview(conn, where_sql, params):
     """.format(
         win30=rate_sql("r.return_30m_pct > 0", "r.return_30m_pct IS NOT NULL"),
         win60=rate_sql("r.return_60m_pct > 0", "r.return_60m_pct IS NOT NULL"),
+        net_win60=rate_sql(
+            "r.return_60m_pct > {cost}".format(cost=ROUND_TRIP_COST_PCT),
+            "r.return_60m_pct IS NOT NULL"
+        ),
         directional30=directional_success_rate_sql("r.return_30m_pct"),
         directional60=directional_success_rate_sql("r.return_60m_pct"),
         target1=rate_sql("r.target_1_hit = 1", "r.target_1_hit IS NOT NULL"),
         target2=rate_sql("r.target_2_hit = 1", "r.target_2_hit IS NOT NULL"),
         stop=rate_sql("r.stop_loss_hit = 1", "r.stop_loss_hit IS NOT NULL"),
+        cost=ROUND_TRIP_COST_PCT,
         where_sql=where_sql,
     )
     return conn.execute(sql, params).fetchone()
@@ -167,10 +185,13 @@ def fetch_group_rows(conn, group_expr, where_sql, params):
             ROUND(AVG(r.return_10m_pct), 3) AS avg_return_10m_pct,
             ROUND(AVG(r.return_30m_pct), 3) AS avg_return_30m_pct,
             ROUND(AVG(r.return_60m_pct), 3) AS avg_return_60m_pct,
+            ROUND(AVG(r.return_30m_pct - {cost}), 3) AS avg_net_return_30m_pct,
+            ROUND(AVG(r.return_60m_pct - {cost}), 3) AS avg_net_return_60m_pct,
             ROUND(AVG(r.max_gain_60m_pct), 3) AS avg_max_gain_60m_pct,
             ROUND(AVG(r.max_loss_60m_pct), 3) AS avg_max_loss_60m_pct,
             {win30} AS win_rate_30m_pct,
             {win60} AS win_rate_60m_pct,
+            {net_win60} AS net_win_rate_60m_pct,
             {directional30} AS directional_success_30m_pct,
             {directional60} AS directional_success_60m_pct,
             {target1} AS target_1_hit_rate_pct,
@@ -186,11 +207,16 @@ def fetch_group_rows(conn, group_expr, where_sql, params):
         group_expr=group_expr,
         win30=rate_sql("r.return_30m_pct > 0", "r.return_30m_pct IS NOT NULL"),
         win60=rate_sql("r.return_60m_pct > 0", "r.return_60m_pct IS NOT NULL"),
+        net_win60=rate_sql(
+            "r.return_60m_pct > {cost}".format(cost=ROUND_TRIP_COST_PCT),
+            "r.return_60m_pct IS NOT NULL"
+        ),
         directional30=directional_success_rate_sql("r.return_30m_pct"),
         directional60=directional_success_rate_sql("r.return_60m_pct"),
         target1=rate_sql("r.target_1_hit = 1", "r.target_1_hit IS NOT NULL"),
         target2=rate_sql("r.target_2_hit = 1", "r.target_2_hit IS NOT NULL"),
         stop=rate_sql("r.stop_loss_hit = 1", "r.stop_loss_hit IS NOT NULL"),
+        cost=ROUND_TRIP_COST_PCT,
         where_sql=where_sql,
     )
     return conn.execute(sql, params).fetchall()
@@ -269,6 +295,18 @@ def directional_success_rate_sql(return_column):
     ).format(denominator=denominator, success=success)
 
 
+def decision_side_expr():
+    return (
+        "CASE "
+        "WHEN s.action_hint IN ({long_actions}) THEN 'long_candidate' "
+        "WHEN s.action_hint IN ({caution_actions}) THEN 'caution_or_avoid' "
+        "ELSE 'unknown' END"
+    ).format(
+        long_actions=sql_in_list(LONG_ACTIONS),
+        caution_actions=sql_in_list(CAUTION_ACTIONS),
+    )
+
+
 def sql_in_list(values):
     return ",".join("'{}'".format(value.replace("'", "''")) for value in values)
 
@@ -287,6 +325,7 @@ def quality_label(row, min_sample):
     evaluated = row.get("evaluated_60m_count") or 0
     directional_60m = row.get("directional_success_60m_pct")
     avg_60m = row.get("avg_return_60m_pct")
+    net_avg_60m = row.get("avg_net_return_60m_pct")
     stop_hit = row.get("stop_loss_hit_rate_pct")
 
     if evaluated < min_sample:
@@ -298,10 +337,10 @@ def quality_label(row, min_sample):
     if directional_60m is not None and directional_60m < 40:
         return "판단하향검토"
 
-    if avg_60m is not None and avg_60m > 0 and (stop_hit is None or stop_hit <= 45):
+    if net_avg_60m is not None and net_avg_60m > 0 and (stop_hit is None or stop_hit <= 45):
         return "수익우수"
 
-    if avg_60m is not None and avg_60m < 0:
+    if net_avg_60m is not None and net_avg_60m < 0:
         return "수익하향검토"
 
     if stop_hit is not None and stop_hit >= 60:
@@ -342,7 +381,8 @@ def print_text_report(report):
     print(
         "signals={signals}, evaluated={evaluated}, pending={pending}, partial={partial}, "
         "eval_5/10/30/60m={eval5}/{eval10}/{eval30}/{eval60}, "
-        "avg_30m={avg30}, avg_60m={avg60}, win_60m={win60}, "
+        "cost={cost}, avg_30m={avg30}, avg_60m={avg60}, "
+        "net_avg_30m={net30}, net_avg_60m={net60}, win_60m={win60}, net_win_60m={netwin60}, "
         "directional_60m={directional60}, stop_hit={stop}"
         .format(
             signals=overview.get("signal_count"),
@@ -353,9 +393,13 @@ def print_text_report(report):
             eval10=overview.get("evaluated_10m_count"),
             eval30=overview.get("evaluated_30m_count"),
             eval60=overview.get("evaluated_60m_count"),
+            cost=round(ROUND_TRIP_COST_PCT, 4),
             avg30=overview.get("avg_return_30m_pct"),
             avg60=overview.get("avg_return_60m_pct"),
+            net30=overview.get("avg_net_return_30m_pct"),
+            net60=overview.get("avg_net_return_60m_pct"),
             win60=overview.get("win_rate_60m_pct"),
+            netwin60=overview.get("net_win_rate_60m_pct"),
             directional60=overview.get("directional_success_60m_pct"),
             stop=overview.get("stop_loss_hit_rate_pct"),
         )
@@ -366,6 +410,10 @@ def print_text_report(report):
 
     print("[By Action]")
     print_group_rows(report["by_action"])
+    print()
+
+    print("[By Decision Side]")
+    print_group_rows(report["by_decision_side"])
     print()
 
     print("[By Code]")
@@ -409,8 +457,9 @@ def print_group_rows(rows):
 
     for item in rows:
         print(
-            "  {name}: signals={signals}, eval={evaluated}, eval60={eval60}, partial={partial}, avg60={avg60}, "
-            "win60={win60}, directional60={directional60}, stop={stop}, "
+            "  {name}: signals={signals}, eval={evaluated}, eval60={eval60}, partial={partial}, "
+            "avg60={avg60}, net60={net60}, win60={win60}, netwin60={netwin60}, "
+            "directional60={directional60}, stop={stop}, "
             "label={label}, hint={hint}"
             .format(
                 name=item.get("group_name"),
@@ -419,7 +468,9 @@ def print_group_rows(rows):
                 eval60=item.get("evaluated_60m_count"),
                 partial=item.get("partial_evaluated_count"),
                 avg60=item.get("avg_return_60m_pct"),
+                net60=item.get("avg_net_return_60m_pct"),
                 win60=item.get("win_rate_60m_pct"),
+                netwin60=item.get("net_win_rate_60m_pct"),
                 directional60=item.get("directional_success_60m_pct"),
                 stop=item.get("stop_loss_hit_rate_pct"),
                 label=item.get("quality_label"),
