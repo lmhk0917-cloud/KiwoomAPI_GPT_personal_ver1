@@ -95,6 +95,22 @@ ENABLE_RISK_ON_PULLBACK_RELABEL = True
 SIGNAL_RISK_ON_MIN_MARKET_CHANGE_PCT = 1.0
 SIGNAL_RISK_ON_MIN_STOCK_CHANGE_PCT = 1.0
 
+# Pullback candidates are fragile in weak tapes or before large macro events.
+SIGNAL_PULLBACK_MIN_CONFIRMING_VWAP_TIMEFRAMES = 1
+SIGNAL_PULLBACK_MACRO_EVENT_PENALTY = 10
+SIGNAL_PULLBACK_MACRO_EVENT_KEYWORDS = [
+    "CPI",
+    "Core CPI",
+    "Consumer Price Index",
+    "PPI",
+    "Core PPI",
+    "FOMC",
+    "Federal Reserve",
+    "Fed",
+    "rate decision",
+    "inflation",
+]
+
 # Notifications. Console is enabled by default. Telegram is filtered to reduce
 # noise when it is enabled in app settings.
 ENABLE_NOTIFICATIONS = True

@@ -160,6 +160,55 @@ class SignalLogicTest(unittest.TestCase):
         self.assertEqual("AVOID_SUPPLY", signal["action_hint"])
         self.assertEqual("high", signal["risk_level"])
 
+    def test_pullback_requires_3m_or_5m_vwap_confirmation(self):
+        weak_pullback = {
+            "1m": _timeframe(above_vwap=True),
+            "3m": _timeframe(above_vwap=False),
+            "5m": _timeframe(above_vwap=False),
+        }
+
+        signal = generate_validation_signal(
+            _summary(
+                ["NEAR_VWAP_SUPPORT", "ORDERBOOK_BID_IMBALANCE"],
+                timeframes=weak_pullback,
+            )
+        )
+
+        self.assertEqual("OBSERVE_EVENT", signal["action_hint"])
+        self.assertEqual("high", signal["risk_level"])
+
+    def test_pullback_is_blocked_by_market_foreign_sell_pressure(self):
+        signal = generate_validation_signal(
+            _summary([
+                "NEAR_VWAP_SUPPORT",
+                "ORDERBOOK_BID_IMBALANCE",
+                "MARKET_FOREIGN_SELL_PRESSURE",
+            ])
+        )
+
+        self.assertEqual("OBSERVE_EVENT", signal["action_hint"])
+        self.assertEqual("high", signal["risk_level"])
+
+    def test_pullback_is_downgraded_before_high_impact_macro_event(self):
+        signal = generate_validation_signal(
+            _summary(
+                ["NEAR_VWAP_SUPPORT", "ORDERBOOK_BID_IMBALANCE"],
+                market_context={
+                    "macro_context": {
+                        "next_macro_events": [
+                            {
+                                "time": "2026-06-10 21:30 KST",
+                                "title": "US CPI and Core CPI release",
+                            }
+                        ]
+                    }
+                },
+            )
+        )
+
+        self.assertEqual("OBSERVE_EVENT", signal["action_hint"])
+        self.assertEqual("high", signal["risk_level"])
+
 
 if __name__ == "__main__":
     unittest.main()

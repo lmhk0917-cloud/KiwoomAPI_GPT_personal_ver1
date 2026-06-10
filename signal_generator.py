@@ -16,6 +16,9 @@ from config import (
     ENABLE_RISK_ON_PULLBACK_RELABEL,
     SIGNAL_RISK_ON_MIN_MARKET_CHANGE_PCT,
     SIGNAL_RISK_ON_MIN_STOCK_CHANGE_PCT,
+    SIGNAL_PULLBACK_MIN_CONFIRMING_VWAP_TIMEFRAMES,
+    SIGNAL_PULLBACK_MACRO_EVENT_PENALTY,
+    SIGNAL_PULLBACK_MACRO_EVENT_KEYWORDS,
 )
 from signal_quality import apply_quality_tuning, pullback_stop_loss
 
@@ -209,6 +212,17 @@ def generate_validation_signal(summary, settings=None):
         settings=settings,
     )
 
+    action_hint, confidence_score, risk_level, reasons = _apply_pullback_safety_filter(
+        summary=summary,
+        event_types=event_types,
+        trend_state=trend_state,
+        action_hint=action_hint,
+        confidence_score=confidence_score,
+        risk_level=risk_level,
+        reasons=reasons,
+        settings=settings,
+    )
+
     action_hint, confidence_score, risk_level, reasons = apply_quality_tuning(
         summary=summary,
         event_types=event_types,
@@ -323,6 +337,111 @@ def _apply_risk_on_pullback_relabel(
         "Risk-on market and positive stock tape turn the short-term downtrend into a pullback watch."
     )
     return action_hint, confidence_score, risk_level, reasons
+
+
+def _apply_pullback_safety_filter(
+    summary,
+    event_types,
+    trend_state,
+    action_hint,
+    confidence_score,
+    risk_level,
+    reasons,
+    settings=None,
+):
+    """Downgrade pullback watches when confirmation or macro safety is weak."""
+    if action_hint != "WATCH_PULLBACK":
+        return action_hint, confidence_score, risk_level, reasons
+
+    if _has_hard_pullback_risk(summary, event_types, settings=settings):
+        confidence_score -= _to_float(_setting(
+            settings,
+            "SIGNAL_PULLBACK_MACRO_EVENT_PENALTY",
+            SIGNAL_PULLBACK_MACRO_EVENT_PENALTY,
+        )) or 0
+        risk_level = "high"
+        reasons.append(
+            "Pullback watch is downgraded because market flow or scheduled macro-event risk is high."
+        )
+        if trend_state.get("bearish_timeframes", 0) >= 2:
+            return "AVOID_DOWNTREND", confidence_score, risk_level, reasons
+        return "OBSERVE_EVENT", confidence_score, risk_level, reasons
+
+    required = int(_to_float(_setting(
+        settings,
+        "SIGNAL_PULLBACK_MIN_CONFIRMING_VWAP_TIMEFRAMES",
+        SIGNAL_PULLBACK_MIN_CONFIRMING_VWAP_TIMEFRAMES,
+    )) or 0)
+    confirming = _confirming_vwap_timeframes(summary)
+    if confirming < required:
+        confidence_score -= 10
+        risk_level = "high"
+        reasons.append(
+            "Pullback watch lacks 3m/5m VWAP confirmation; treat as observation only."
+        )
+        if trend_state.get("bearish_timeframes", 0) >= 2:
+            return "AVOID_DOWNTREND", confidence_score, risk_level, reasons
+        return "OBSERVE_EVENT", confidence_score, risk_level, reasons
+
+    return action_hint, confidence_score, risk_level, reasons
+
+
+def _has_hard_pullback_risk(summary, event_types, settings=None):
+    hard_events = {
+        "MARKET_SIDECAR_ACTIVE",
+        "MARKET_CIRCUIT_BREAKER_ACTIVE",
+        "MARKET_VI_ACTIVE",
+        "MARKET_FOREIGN_SELL_PRESSURE",
+        "ORDERBOOK_ASK_IMBALANCE",
+    }
+    if event_types.intersection(hard_events):
+        return True
+
+    market_context = summary.get("market_context") or {}
+    macro_context = market_context.get("macro_context") or {}
+    if _has_high_impact_macro_event(macro_context, settings=settings):
+        return True
+
+    return False
+
+
+def _confirming_vwap_timeframes(summary):
+    timeframes = summary.get("timeframes") or {}
+    count = 0
+    for label in ("3m", "5m"):
+        timeframe = timeframes.get(label) or {}
+        vwap = timeframe.get("vwap") or {}
+        if vwap.get("price_above_vwap") is True:
+            count += 1
+    return count
+
+
+def _has_high_impact_macro_event(macro_context, settings=None):
+    keywords = _setting(
+        settings,
+        "SIGNAL_PULLBACK_MACRO_EVENT_KEYWORDS",
+        SIGNAL_PULLBACK_MACRO_EVENT_KEYWORDS,
+    )
+    lowered_keywords = [
+        str(keyword).lower()
+        for keyword in (keywords or [])
+        if str(keyword).strip()
+    ]
+    if not lowered_keywords:
+        return False
+
+    for event in macro_context.get("next_macro_events") or []:
+        event_text = _macro_event_text(event).lower()
+        if any(keyword in event_text for keyword in lowered_keywords):
+            return True
+
+    return False
+
+
+def _macro_event_text(event):
+    if isinstance(event, dict):
+        return " ".join(str(value) for value in event.values() if value is not None)
+    return str(event)
 
 
 def _is_risk_on_pullback_context(summary, settings=None):
