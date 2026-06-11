@@ -111,6 +111,12 @@ SIGNAL_PULLBACK_MACRO_EVENT_KEYWORDS = [
     "inflation",
 ]
 
+# VWAP resistance is not always bearish in a risk-on tape. If the market,
+# stock, and 3m/5m confirmation align, treat it as momentum observation instead
+# of an avoid/caution signal.
+ENABLE_RISK_ON_RESISTANCE_RELABEL = True
+SIGNAL_RESISTANCE_MIN_CONFIRMING_VWAP_TIMEFRAMES = 1
+
 # Notifications. Console is enabled by default. Telegram is filtered to reduce
 # noise when it is enabled in app settings.
 ENABLE_NOTIFICATIONS = True

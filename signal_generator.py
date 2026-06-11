@@ -19,6 +19,8 @@ from config import (
     SIGNAL_PULLBACK_MIN_CONFIRMING_VWAP_TIMEFRAMES,
     SIGNAL_PULLBACK_MACRO_EVENT_PENALTY,
     SIGNAL_PULLBACK_MACRO_EVENT_KEYWORDS,
+    ENABLE_RISK_ON_RESISTANCE_RELABEL,
+    SIGNAL_RESISTANCE_MIN_CONFIRMING_VWAP_TIMEFRAMES,
 )
 from signal_quality import apply_quality_tuning, pullback_stop_loss
 
@@ -223,6 +225,17 @@ def generate_validation_signal(summary, settings=None):
         settings=settings,
     )
 
+    action_hint, confidence_score, risk_level, reasons = _apply_risk_on_resistance_relabel(
+        summary=summary,
+        event_types=event_types,
+        trend_state=trend_state,
+        action_hint=action_hint,
+        confidence_score=confidence_score,
+        risk_level=risk_level,
+        reasons=reasons,
+        settings=settings,
+    )
+
     action_hint, confidence_score, risk_level, reasons = apply_quality_tuning(
         summary=summary,
         event_types=event_types,
@@ -337,6 +350,62 @@ def _apply_risk_on_pullback_relabel(
         "Risk-on market and positive stock tape turn the short-term downtrend into a pullback watch."
     )
     return action_hint, confidence_score, risk_level, reasons
+
+
+def _apply_risk_on_resistance_relabel(
+    summary,
+    event_types,
+    trend_state,
+    action_hint,
+    confidence_score,
+    risk_level,
+    reasons,
+    settings=None,
+):
+    """Downgrade false resistance warnings in a confirmed risk-on tape."""
+    enabled = _setting(
+        settings,
+        "ENABLE_RISK_ON_RESISTANCE_RELABEL",
+        ENABLE_RISK_ON_RESISTANCE_RELABEL,
+    )
+    if not enabled or action_hint != "WATCH_RESISTANCE":
+        return action_hint, confidence_score, risk_level, reasons
+
+    if trend_state.get("bearish_timeframes", 0) > 0:
+        return action_hint, confidence_score, risk_level, reasons
+
+    if _has_hard_resistance_momentum_risk(event_types):
+        return action_hint, confidence_score, risk_level, reasons
+
+    required = int(_to_float(_setting(
+        settings,
+        "SIGNAL_RESISTANCE_MIN_CONFIRMING_VWAP_TIMEFRAMES",
+        SIGNAL_RESISTANCE_MIN_CONFIRMING_VWAP_TIMEFRAMES,
+    )) or 0)
+    if _confirming_vwap_timeframes(summary) < required:
+        return action_hint, confidence_score, risk_level, reasons
+
+    if not _is_risk_on_pullback_context(summary, settings=settings):
+        return action_hint, confidence_score, risk_level, reasons
+
+    action_hint = "WATCH_MOMENTUM"
+    risk_level = "medium"
+    confidence_score += 6
+    reasons.append(
+        "Risk-on market and 3m/5m VWAP confirmation soften VWAP resistance into momentum observation."
+    )
+    return action_hint, confidence_score, risk_level, reasons
+
+
+def _has_hard_resistance_momentum_risk(event_types):
+    hard_events = {
+        "MARKET_SIDECAR_ACTIVE",
+        "MARKET_CIRCUIT_BREAKER_ACTIVE",
+        "MARKET_VI_ACTIVE",
+        "MARKET_FOREIGN_SELL_PRESSURE",
+        "ORDERBOOK_ASK_IMBALANCE",
+    }
+    return bool(event_types.intersection(hard_events))
 
 
 def _apply_pullback_safety_filter(
