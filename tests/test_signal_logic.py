@@ -209,7 +209,7 @@ class SignalLogicTest(unittest.TestCase):
         self.assertEqual("OBSERVE_EVENT", signal["action_hint"])
         self.assertEqual("high", signal["risk_level"])
 
-    def test_risk_on_vwap_resistance_becomes_momentum_watch(self):
+    def test_unconfirmed_vwap_resistance_stays_observation(self):
         signal = generate_validation_signal(
             _summary(
                 ["NEAR_VWAP_RESISTANCE"],
@@ -221,8 +221,9 @@ class SignalLogicTest(unittest.TestCase):
             )
         )
 
-        self.assertEqual("WATCH_MOMENTUM", signal["action_hint"])
-        self.assertEqual("medium", signal["risk_level"])
+        self.assertEqual("OBSERVE_EVENT", signal["action_hint"])
+        self.assertEqual("high", signal["risk_level"])
+        self.assertLess(signal["confidence_score"], 55)
 
     def test_risk_on_vwap_resistance_does_not_override_market_selling(self):
         signal = generate_validation_signal(
@@ -237,6 +238,21 @@ class SignalLogicTest(unittest.TestCase):
         )
 
         self.assertEqual("WATCH_RESISTANCE", signal["action_hint"])
+        self.assertEqual("high", signal["risk_level"])
+
+    def test_ask_imbalance_alone_stays_observation(self):
+        signal = generate_validation_signal(_summary(["ORDERBOOK_ASK_IMBALANCE"]))
+
+        self.assertEqual("OBSERVE_EVENT", signal["action_hint"])
+        self.assertEqual("high", signal["risk_level"])
+        self.assertLess(signal["confidence_score"], 55)
+
+    def test_ask_imbalance_with_downtrend_becomes_supply_avoid(self):
+        signal = generate_validation_signal(
+            _summary(["ORDERBOOK_ASK_IMBALANCE", "CONSECUTIVE_DOWN_BARS"])
+        )
+
+        self.assertEqual("AVOID_SUPPLY", signal["action_hint"])
         self.assertEqual("high", signal["risk_level"])
 
 

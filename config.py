@@ -120,6 +120,12 @@ SIGNAL_PULLBACK_MACRO_EVENT_KEYWORDS = [
 ENABLE_RISK_ON_RESISTANCE_RELABEL = True
 SIGNAL_RESISTANCE_MIN_CONFIRMING_VWAP_TIMEFRAMES = 1
 
+# Post-market paper validation showed too many false caution signals from
+# standalone VWAP resistance and one-sided orderbook supply. Keep these strict
+# unless another price/flow condition confirms the risk.
+SIGNAL_REQUIRE_RESISTANCE_CONFIRMATION = True
+SIGNAL_REQUIRE_SUPPLY_CONFIRMATION = True
+
 # Notifications. Console is enabled by default. Telegram is filtered to reduce
 # noise when it is enabled in app settings.
 ENABLE_NOTIFICATIONS = True

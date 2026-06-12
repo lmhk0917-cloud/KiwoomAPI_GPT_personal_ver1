@@ -21,6 +21,8 @@ from config import (
     SIGNAL_PULLBACK_MACRO_EVENT_KEYWORDS,
     ENABLE_RISK_ON_RESISTANCE_RELABEL,
     SIGNAL_RESISTANCE_MIN_CONFIRMING_VWAP_TIMEFRAMES,
+    SIGNAL_REQUIRE_RESISTANCE_CONFIRMATION,
+    SIGNAL_REQUIRE_SUPPLY_CONFIRMATION,
 )
 from signal_quality import apply_quality_tuning, pullback_stop_loss
 
@@ -101,8 +103,19 @@ def generate_validation_signal(summary, settings=None):
 
     if "NEAR_VWAP_RESISTANCE" in event_types:
         risk_level = "high" if risk_level == "medium" else risk_level
-        if action_hint == "OBSERVE_EVENT":
+        resistance_confirmed = _has_resistance_confirmation(event_types, trend_state)
+        require_confirmation = _setting(
+            settings,
+            "SIGNAL_REQUIRE_RESISTANCE_CONFIRMATION",
+            SIGNAL_REQUIRE_RESISTANCE_CONFIRMATION,
+        )
+        if action_hint == "OBSERVE_EVENT" and (resistance_confirmed or not require_confirmation):
             action_hint = "WATCH_RESISTANCE"
+        elif action_hint == "OBSERVE_EVENT":
+            confidence_score -= 8
+            reasons.append(
+                "VWAP resistance is unconfirmed; keep it as observation until supply or trend risk appears."
+            )
         reasons.append("Price is close to VWAP resistance.")
 
     if "ORDERBOOK_BID_IMBALANCE" in event_types:
@@ -111,8 +124,25 @@ def generate_validation_signal(summary, settings=None):
 
     if "ORDERBOOK_ASK_IMBALANCE" in event_types:
         risk_level = "high"
-        if action_hint in ("OBSERVE_EVENT", "WATCH_SUPPORT", "WATCH_PULLBACK"):
+        supply_confirmed = _has_supply_confirmation(event_types, trend_state)
+        require_confirmation = _setting(
+            settings,
+            "SIGNAL_REQUIRE_SUPPLY_CONFIRMATION",
+            SIGNAL_REQUIRE_SUPPLY_CONFIRMATION,
+        )
+        if action_hint in ("OBSERVE_EVENT", "WATCH_SUPPORT", "WATCH_PULLBACK") and (
+            supply_confirmed or not require_confirmation
+        ):
             action_hint = "AVOID_SUPPLY"
+        elif action_hint in ("WATCH_SUPPORT", "WATCH_PULLBACK"):
+            action_hint = "OBSERVE_EVENT"
+            confidence_score -= 10
+            reasons.append(
+                "Ask-side imbalance conflicts with support/pullback, but lacks confirmation for a supply-avoid signal."
+            )
+        elif not supply_confirmed and require_confirmation:
+            confidence_score -= 8
+            reasons.append("Ask-side imbalance alone is not enough to classify as avoid-supply.")
         reasons.append("Ask-side orderbook imbalance adds short-term supply risk.")
 
     if "CONSECUTIVE_UP_BARS" in event_types:
@@ -406,6 +436,41 @@ def _has_hard_resistance_momentum_risk(event_types):
         "ORDERBOOK_ASK_IMBALANCE",
     }
     return bool(event_types.intersection(hard_events))
+
+
+def _has_resistance_confirmation(event_types, trend_state):
+    """Return True when VWAP resistance has extra caution evidence."""
+    confirming_events = {
+        "NEAR_BOX_HIGH",
+        "RSI_OVERBOUGHT",
+        "ORDERBOOK_ASK_IMBALANCE",
+        "MA5_MA20_DEAD_CROSS",
+        "CONSECUTIVE_DOWN_BARS",
+        "MARKET_FOREIGN_SELL_PRESSURE",
+    }
+    if event_types.intersection(confirming_events):
+        return True
+    if trend_state.get("bearish_timeframes", 0) >= 1:
+        return True
+    return False
+
+
+def _has_supply_confirmation(event_types, trend_state):
+    """Return True when ask-side pressure is supported by trend or flow risk."""
+    confirming_events = {
+        "MA5_MA20_DEAD_CROSS",
+        "CONSECUTIVE_DOWN_BARS",
+        "MARKET_FOREIGN_SELL_PRESSURE",
+        "NEAR_BOX_HIGH",
+        "RSI_OVERBOUGHT",
+    }
+    if event_types.intersection(confirming_events):
+        return True
+    if trend_state.get("bearish_timeframes", 0) >= 1:
+        return True
+    if trend_state.get("below_vwap_timeframes", 0) >= 2:
+        return True
+    return False
 
 
 def _apply_pullback_safety_filter(
