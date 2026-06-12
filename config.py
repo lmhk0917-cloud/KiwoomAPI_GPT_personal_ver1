@@ -12,6 +12,9 @@ WATCH_CODES = {
 MARKET_BENCHMARK_CODES = {
     "069500": "KODEX 200",
     "229200": "KODEX 코스닥150",
+    "091160": "KODEX 반도체",
+    "139260": "TIGER 200 IT",
+    "102780": "KODEX 삼성그룹",
 }
 
 # GPT analysis timer. Event filtering means GPT is called only when meaningful
