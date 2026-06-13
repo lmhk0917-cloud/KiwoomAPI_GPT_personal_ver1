@@ -16,10 +16,12 @@ from PyQt5.QtWidgets import QApplication
 from app_paths import setup_runtime_logging
 from config import (
     ENABLE_MACRO_CONTEXT_CRAWL,
+    ENABLE_INTRADAY_NEWS_CONTEXT,
     ENABLE_PAPER_TRADE_EVALUATION,
     GPT_ANALYSIS_INTERVAL_SEC,
     GPT_MAX_SYMBOLS_PER_CALL,
     GPT_MIN_SIGNAL_SCORE,
+    GPT_FORCE_EVENT_TYPES,
     MACRO_CONTEXT_REFRESH_INTERVAL_SEC,
     GPT_STRONG_EVENT_TYPES,
     MARKET_BENCHMARK_CODES,
@@ -28,6 +30,8 @@ from config import (
     PAPER_TRADE_EVALUATION_LIMIT,
     PRELOAD_TICKS_MAX_AGE_MINUTES,
     PRELOAD_TICKS_PER_CODE,
+    NEWS_CONTEXT_COOLDOWN_SEC,
+    NEWS_CONTEXT_TRIGGER_EVENT_TYPES,
     TELEGRAM_ALLOWED_ACTION_HINTS,
     TELEGRAM_ALWAYS_NOTIFY_EVENT_TYPES,
     TELEGRAM_MIN_SIGNAL_SCORE,
@@ -39,7 +43,7 @@ from event_detector import detect_gpt_events
 from gpt_analyzer import GPTAnalyzer
 from indicators import make_market_snapshot, summarize_multi_timeframes_for_gpt
 from kiwoom_client import KiwoomClient
-from macro_context_fetcher import fetch_macro_context
+from macro_context_fetcher import fetch_macro_context, fetch_news_context
 from market_context import MarketContextStore
 from notifier import Notifier
 from paper_trade_simulator import evaluate_signal as evaluate_paper_signal
@@ -73,6 +77,7 @@ class RealtimeStrategyApp:
         self.pending_context_tr_requests = []
         self.context_tr_request_delay_ms = MARKET_CONTEXT_TR_REQUEST_DELAY_MS
         self.last_macro_context_crawled_at = None
+        self.last_news_context_checked_at = {}
         self.last_market_status_snapshot_key = None
         self.notifier = Notifier()
         self.market_context_store = MarketContextStore()
@@ -190,6 +195,16 @@ class RealtimeStrategyApp:
 
                 gpt_eligible, skip_reason = self._is_gpt_eligible(summary, events, signal)
                 print(f"{name}({code}) GPT event:", [event["type"] for event in events])
+
+                if gpt_eligible:
+                    self._maybe_refresh_news_context(
+                        summary=summary,
+                        events=events,
+                        signal=signal,
+                        now=now
+                    )
+                    summary["market_context"] = self.market_context_store.get_context(code)
+
                 self.tick_store.save_event_logs(
                     summary=summary,
                     events=events,
@@ -315,6 +330,7 @@ class RealtimeStrategyApp:
                 score = None
 
         strong_event_types = set(self._get_setting("GPT_STRONG_EVENT_TYPES", GPT_STRONG_EVENT_TYPES) or [])
+        force_event_types = set(self._get_setting("GPT_FORCE_EVENT_TYPES", GPT_FORCE_EVENT_TYPES) or [])
         event_types = [event.get("type") for event in events or []]
         critical_event_types = {
             "MARKET_SIDECAR_ACTIVE",
@@ -322,7 +338,7 @@ class RealtimeStrategyApp:
             "MARKET_VI_ACTIVE",
         }
 
-        if critical_event_types.intersection(event_types):
+        if critical_event_types.intersection(event_types) or force_event_types.intersection(event_types):
             return True, None
 
         strong_event_count = sum(1 for event_type in event_types if event_type in strong_event_types)
@@ -598,6 +614,82 @@ class RealtimeStrategyApp:
             payload=macro_context,
             collected_at=macro_context.get("asof") or now.strftime("%Y-%m-%d %H:%M:%S.%f"),
             source=macro_context.get("source") or "crawler",
+        )
+
+    def _maybe_refresh_news_context(self, summary, events, signal, now):
+        """Fetch low-weight news context only for unusual/problem events."""
+        if not self._get_setting("ENABLE_INTRADAY_NEWS_CONTEXT", ENABLE_INTRADAY_NEWS_CONTEXT):
+            return
+
+        code = summary.get("code")
+        if not code:
+            return
+
+        trigger_types = set(self._get_setting(
+            "NEWS_CONTEXT_TRIGGER_EVENT_TYPES",
+            NEWS_CONTEXT_TRIGGER_EVENT_TYPES
+        ) or [])
+        event_types = {event.get("type") for event in events or []}
+
+        if not trigger_types.intersection(event_types):
+            return
+
+        cooldown_sec = self._get_setting("NEWS_CONTEXT_COOLDOWN_SEC", NEWS_CONTEXT_COOLDOWN_SEC)
+        try:
+            cooldown_sec = int(cooldown_sec)
+        except (TypeError, ValueError):
+            cooldown_sec = NEWS_CONTEXT_COOLDOWN_SEC
+
+        last_checked_at = self.last_news_context_checked_at.get(code)
+        if last_checked_at and (now - last_checked_at).total_seconds() < cooldown_sec:
+            return
+
+        try:
+            news_context = fetch_news_context(
+                code=code,
+                name=summary.get("name"),
+                events=events,
+                summary=summary,
+                settings=self.settings,
+            )
+        except Exception as exc:
+            news_context = {
+                "asof": now.strftime("%Y-%m-%d %H:%M:%S.%f"),
+                "source": "macro_context_fetcher",
+                "reliability": "crawler_failed",
+                "weight": "low_intraday",
+                "notes": ["news context refresh failed: {}".format(exc)],
+            }
+
+        self.market_context_store.update_news(code, news_context)
+        self.market_context_store.update_code_context(code, "data_quality", {
+            "news_last_checked_at": news_context.get("asof") or now.strftime("%Y-%m-%d %H:%M:%S.%f"),
+        })
+        self._save_news_context_snapshot(code, news_context, now)
+        self.last_news_context_checked_at[code] = now
+        print(
+            "News context refreshed:",
+            code,
+            news_context.get("reliability"),
+            news_context.get("sentiment"),
+            news_context.get("direction_bias"),
+        )
+
+    def _save_news_context_snapshot(self, code, news_context, now):
+        save_snapshot = getattr(self.tick_store, "save_market_context_snapshot", None)
+        if not save_snapshot:
+            return
+
+        save_snapshot(
+            scope="code",
+            code=code,
+            section="news",
+            payload=news_context,
+            collected_at=news_context.get("asof") or now.strftime("%Y-%m-%d %H:%M:%S.%f"),
+            source=news_context.get("source") or "crawler",
+            reliability=news_context.get("reliability"),
+            weight=news_context.get("weight"),
+            summary=news_context.get("summary"),
         )
 
     def _maybe_save_market_status_snapshot(self, now):

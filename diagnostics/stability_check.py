@@ -5,7 +5,7 @@ tiny live OpenAI smoke test so the GPT path is verified before market tests.
 """
 
 import argparse
-import compileall
+import ast
 import os
 import subprocess
 import sys
@@ -34,7 +34,7 @@ def main():
     log("ARTIFACT_DIR={}".format(ARTIFACT_DIR))
 
     run_compile_check()
-    run_script(["preflight_check.py"])
+    run_script(["preflight_check.py", "--allow-inspection-unavailable"])
     run_script(["tests/test_signal_logic.py"])
     run_script([
         "simulate_debug.py",
@@ -66,10 +66,26 @@ def main():
 
 
 def run_compile_check():
-    log("\n========== compileall ==========")
-    ok = compileall.compile_dir(PROJECT_DIR, quiet=1)
-    if not ok:
-        raise SystemExit("compileall failed")
+    log("\n========== ast syntax check ==========")
+    checked = 0
+    ignored_dirs = {".git", "__pycache__", ".pytest_cache"}
+
+    for root, dirs, files in os.walk(PROJECT_DIR):
+        dirs[:] = [name for name in dirs if name not in ignored_dirs]
+        for filename in files:
+            if not filename.endswith(".py"):
+                continue
+
+            path = os.path.join(root, filename)
+            with open(path, "r", encoding="utf-8-sig") as handle:
+                source = handle.read()
+            try:
+                ast.parse(source, filename=path)
+            except SyntaxError as exc:
+                raise SystemExit("syntax check failed: {}: {}".format(path, exc))
+            checked += 1
+
+    log("AST_SYNTAX_OK={}".format(checked))
 
 
 def run_script(args):

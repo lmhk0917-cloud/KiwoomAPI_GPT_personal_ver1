@@ -10,7 +10,9 @@ import argparse
 import html
 import json
 import re
+import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
 from datetime import datetime
 from html.parser import HTMLParser
 
@@ -18,6 +20,15 @@ import config
 
 
 USER_AGENT = "Mozilla/5.0 KiwoomGPTPersonal/1.0"
+
+NEWS_POSITIVE_KEYWORDS = (
+    "호재", "상승", "급등", "강세", "수주", "실적 개선", "어닝 서프라이즈",
+    "증설", "투자", "목표가 상향", "매수", "반등", "회복",
+)
+NEWS_NEGATIVE_KEYWORDS = (
+    "악재", "하락", "급락", "약세", "매도", "목표가 하향", "적자",
+    "실적 부진", "규제", "소송", "감산", "리콜", "위험", "우려",
+)
 
 
 class TextExtractor(HTMLParser):
@@ -115,6 +126,58 @@ def fetch_macro_context(settings=None):
     ):
         result["reliability"] = "crawler_failed_or_empty"
 
+    return _drop_empty(result)
+
+
+def fetch_news_context(code, name, events=None, summary=None, settings=None):
+    """Return low-weight intraday news context for unusual/problem events."""
+    settings = settings or {}
+    now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
+    timeout = _int_setting(settings, "NEWS_CONTEXT_TIMEOUT_SEC", config.NEWS_CONTEXT_TIMEOUT_SEC)
+    max_items = _int_setting(settings, "NEWS_CONTEXT_MAX_ITEMS", config.NEWS_CONTEXT_MAX_ITEMS)
+    url_template = settings.get(
+        "NEWS_CONTEXT_RSS_URL_TEMPLATE",
+        config.NEWS_CONTEXT_RSS_URL_TEMPLATE
+    )
+
+    event_types = [event.get("type") for event in events or []]
+    query = _build_news_query(code, name, event_types, summary)
+    result = {
+        "asof": now_text,
+        "source": "google_news_rss",
+        "reliability": "crawler_unverified",
+        "weight": "low_intraday",
+        "query": query,
+        "event_types": event_types,
+        "summary": None,
+        "sentiment": "unknown",
+        "direction_bias": "neutral",
+        "confidence_adjustment": 0,
+        "source_count": 0,
+        "items": [],
+        "notes": [],
+    }
+
+    try:
+        url = url_template.format(query=urllib.parse.quote_plus(query))
+        xml_text = _fetch_text(url, timeout)
+        items = _parse_news_rss_items(xml_text, max_items)
+    except Exception as exc:
+        result["reliability"] = "crawler_failed"
+        result["notes"].append("news crawl failed: {}".format(exc))
+        return _drop_empty(result)
+
+    result["items"] = items
+    result["source_count"] = len(items)
+
+    if not items:
+        result["reliability"] = "crawler_empty"
+        result["summary"] = "No recent news items found for query."
+        return _drop_empty(result)
+
+    sentiment = _score_news_items(items)
+    result.update(sentiment)
+    result["summary"] = _build_news_summary(name, sentiment, items)
     return _drop_empty(result)
 
 
@@ -367,6 +430,91 @@ def _normalize_date(value, default_year):
         return "{:04d}-{:02d}-{:02d}".format(int(year), int(month), int(day))
     except ValueError:
         return value
+
+
+def _build_news_query(code, name, event_types, summary):
+    terms = [name or code, code]
+    if "MARKET_FOREIGN_SELL_PRESSURE" in event_types:
+        terms.extend(["외국인", "프로그램", "매도"])
+    if "FORCE_GPT_INTRADAY_EVENT" in event_types:
+        terms.extend(["급등", "급락", "거래량"])
+    if any(event in event_types for event in ("MARKET_SIDECAR_ACTIVE", "MARKET_SIDECAR_RECENT")):
+        terms.extend(["사이드카", "증시"])
+
+    market_context = (summary or {}).get("market_context") or {}
+    macro_context = market_context.get("macro_context") or {}
+    if macro_context.get("risk_regime") in ("risk_off", "high_risk"):
+        terms.append("위험")
+
+    return " ".join(str(term) for term in terms if term)
+
+
+def _parse_news_rss_items(xml_text, max_items):
+    root = ET.fromstring(xml_text)
+    items = []
+    for item in root.findall(".//item")[:max_items]:
+        title = _clean_text(item.findtext("title"))
+        link = _clean_text(item.findtext("link"))
+        published_at = _clean_text(item.findtext("pubDate"))
+        source = item.findtext("{*}source") or item.findtext("source")
+        items.append(_drop_empty({
+            "title": title,
+            "link": link,
+            "published_at": published_at,
+            "source": _clean_text(source),
+        }))
+    return items
+
+
+def _score_news_items(items):
+    joined = " ".join(item.get("title") or "" for item in items)
+    positive = sum(joined.count(keyword) for keyword in NEWS_POSITIVE_KEYWORDS)
+    negative = sum(joined.count(keyword) for keyword in NEWS_NEGATIVE_KEYWORDS)
+
+    if negative > positive:
+        return {
+            "sentiment": "negative",
+            "direction_bias": "risk_off",
+            "confidence_adjustment": -5,
+            "risk_notes": ["News titles lean negative; reduce long-signal confidence slightly."],
+        }
+    if positive > negative:
+        return {
+            "sentiment": "positive",
+            "direction_bias": "risk_on",
+            "confidence_adjustment": 3,
+            "risk_notes": ["News titles lean positive; treat as low-weight confirmation only."],
+        }
+    return {
+        "sentiment": "neutral",
+        "direction_bias": "neutral",
+        "confidence_adjustment": 0,
+        "risk_notes": ["No clear title-level news direction; do not infer a cause."],
+    }
+
+
+def _build_news_summary(name, sentiment, items):
+    first_title = items[0].get("title") if items else None
+    return "{} news context: sentiment={}, bias={}, adjustment={}; top={}".format(
+        name,
+        sentiment.get("sentiment"),
+        sentiment.get("direction_bias"),
+        sentiment.get("confidence_adjustment"),
+        first_title,
+    )
+
+
+def _clean_text(value):
+    if value is None:
+        return None
+    return re.sub(r"\s+", " ", str(value)).strip()
+
+
+def _int_setting(settings, key, default):
+    try:
+        return int(settings.get(key, default))
+    except (TypeError, ValueError):
+        return default
 
 
 def _setting(settings, key, default):

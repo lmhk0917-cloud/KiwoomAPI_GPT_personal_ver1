@@ -62,6 +62,19 @@ GPT_STRONG_EVENT_TYPES = [
     "MARKET_FOREIGN_SELL_PRESSURE",
 ]
 
+# Force GPT review when a fast intraday move is backed by confirmation. This is
+# for unusual sessions/events, not for routine weak single-indicator noise.
+ENABLE_FORCE_GPT_INTRADAY_EVENT = True
+FORCE_GPT_RETURN_1BAR_PCT = 0.8
+FORCE_GPT_VOLUME_RATIO = 2.0
+FORCE_GPT_MIN_CONFIRMATIONS = 2
+GPT_FORCE_EVENT_TYPES = [
+    "FORCE_GPT_INTRADAY_EVENT",
+    "MARKET_SIDECAR_ACTIVE",
+    "MARKET_CIRCUIT_BREAKER_ACTIVE",
+    "MARKET_VI_ACTIVE",
+]
+
 # Trading cost assumptions used only for analysis and paper validation.
 # Values are percentages. Keep them editable because broker fees and taxes vary.
 TRADE_BUY_FEE_PCT = 0.015
@@ -179,6 +192,22 @@ MACRO_BOK_BASE_RATE_URL = "https://www.bok.or.kr/portal/singl/baseRate/progress.
 MACRO_FED_OPEN_MARKET_URL = "https://www.federalreserve.gov/monetarypolicy/openmarket.htm"
 MACRO_EVENT_CALENDAR_URLS = [
     "https://www.bok.or.kr/portal/singl/crncyPolicyDrcMtg/listYear.do?menuNo=200755&mtgSe=A",
+]
+
+# Intraday news context. This is only fetched when a problem/rapid-move event
+# occurs. It is a low-weight GPT context input, not a deterministic trade rule.
+ENABLE_INTRADAY_NEWS_CONTEXT = True
+NEWS_CONTEXT_COOLDOWN_SEC = 900
+NEWS_CONTEXT_TIMEOUT_SEC = 4
+NEWS_CONTEXT_MAX_ITEMS = 5
+NEWS_CONTEXT_RSS_URL_TEMPLATE = "https://news.google.com/rss/search?q={query}&hl=ko&gl=KR&ceid=KR:ko"
+NEWS_CONTEXT_TRIGGER_EVENT_TYPES = [
+    "FORCE_GPT_INTRADAY_EVENT",
+    "MARKET_SIDECAR_ACTIVE",
+    "MARKET_SIDECAR_RECENT",
+    "MARKET_CIRCUIT_BREAKER_ACTIVE",
+    "MARKET_VI_ACTIVE",
+    "MARKET_FOREIGN_SELL_PRESSURE",
 ]
 
 # Realtime tick console printing is useful while debugging, but noisy during

@@ -163,15 +163,23 @@ def list_processes_from_cim():
         "if ($items) { $items | ConvertTo-Json -Compress }"
     )
 
-    try:
-        output = subprocess.check_output(
-            ["powershell", "-NoProfile", "-Command", command],
-            stderr=subprocess.STDOUT,
-            universal_newlines=True,
-            timeout=8,
-        ).strip()
-    except Exception as exc:
-        return None, str(exc)
+    errors = []
+    for powershell_path in executable_candidates(
+        "powershell",
+        os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
+    ):
+        try:
+            output = subprocess.check_output(
+                [powershell_path, "-NoProfile", "-Command", command],
+                stderr=subprocess.STDOUT,
+                universal_newlines=True,
+                timeout=8,
+            ).strip()
+            break
+        except Exception as exc:
+            errors.append("{}: {}".format(powershell_path, exc))
+    else:
+        return None, " | ".join(errors)
 
     if not output:
         return [], None
@@ -197,15 +205,23 @@ def list_processes_from_cim():
 
 def list_processes_from_tasklist():
     """Fallback when command-line process inspection is denied."""
-    try:
-        output = subprocess.check_output(
-            ["tasklist", "/FO", "CSV", "/NH"],
-            stderr=subprocess.STDOUT,
-            universal_newlines=True,
-            timeout=8,
-        )
-    except Exception as exc:
-        return None, str(exc)
+    errors = []
+    for tasklist_path in executable_candidates(
+        "tasklist",
+        os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "tasklist.exe"),
+    ):
+        try:
+            output = subprocess.check_output(
+                [tasklist_path, "/FO", "CSV", "/NH"],
+                stderr=subprocess.STDOUT,
+                universal_newlines=True,
+                timeout=8,
+            )
+            break
+        except Exception as exc:
+            errors.append("{}: {}".format(tasklist_path, exc))
+    else:
+        return None, " | ".join(errors)
 
     processes = []
     reader = csv.reader(io.StringIO(output))
@@ -223,6 +239,21 @@ def list_processes_from_tasklist():
         })
 
     return processes, None
+
+
+def executable_candidates(*paths):
+    """Return unique executable candidates while preserving fallback order."""
+    seen = set()
+    result = []
+    for path in paths:
+        if not path:
+            continue
+        key = path.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(path)
+    return result
 
 
 def is_kiwoom_process(lower_name, command_line, is_python):
@@ -388,6 +419,11 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Check residual Kiwoom/Python sessions.")
     parser.add_argument("--allow-existing-python", action="store_true")
     parser.add_argument("--allow-existing-kiwoom", action="store_true")
+    parser.add_argument(
+        "--allow-inspection-unavailable",
+        action="store_true",
+        help="Return success when process inspection is unavailable. Use only for offline diagnostics.",
+    )
     parser.add_argument("--kill-residual", action="store_true")
     parser.add_argument("--project-dir", default=os.getcwd())
     return parser.parse_args()
@@ -401,6 +437,14 @@ def main():
         kill_residual=args.kill_residual,
         project_dir=args.project_dir,
     )
+    if args.allow_inspection_unavailable and not result.get("inspection_available"):
+        result["warnings"].append({
+            "pid": None,
+            "name": "process_inspection",
+            "command_line": result.get("error") or "",
+            "reason": "inspection_unavailable_allowed",
+        })
+        result["ok"] = True
     print_preflight_report(result)
     return 0 if result["ok"] else 10
 

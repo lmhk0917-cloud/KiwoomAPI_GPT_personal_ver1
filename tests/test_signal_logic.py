@@ -7,12 +7,15 @@ They protect the signal rules that are most likely to affect daily testing.
 import os
 import sys
 import unittest
+from unittest.mock import patch
 
 
 PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_DIR not in sys.path:
     sys.path.insert(0, PROJECT_DIR)
 
+from event_detector import detect_gpt_events
+from macro_context_fetcher import fetch_news_context
 from signal_generator import generate_validation_signal
 
 
@@ -66,6 +69,53 @@ def _summary(events, timeframes=None, market_context=None, detected_at="2026-06-
         },
         "market_context": market_context or {},
     }
+
+
+def _event_summary(return_1bar_pct=0.1, volume_ratio_5=1.0, volume_ratio_20=1.0):
+    return {
+        "code": "005930",
+        "name": "Samsung Electronics",
+        "timeframes": {
+            "1m": {
+                "latest": {
+                    "close": 100.0,
+                    "return_1bar_pct": return_1bar_pct,
+                },
+                "volume": {
+                    "volume_ratio_5": volume_ratio_5,
+                    "volume_ratio_20": volume_ratio_20,
+                },
+                "momentum": {
+                    "rsi14": 50.0,
+                },
+                "box_range": {
+                    "current_position_in_box": 0.5,
+                },
+                "vwap": {
+                    "vwap_distance_pct": 2.0,
+                    "price_above_vwap": True,
+                },
+                "trend": {},
+            }
+        },
+        "market_context": {},
+    }
+
+
+NEWS_RSS = """<?xml version="1.0" encoding="UTF-8"?>
+<rss><channel>
+<item>
+  <title>SK하이닉스 실적 개선 기대에 강세</title>
+  <link>https://example.com/a</link>
+  <pubDate>Fri, 12 Jun 2026 05:00:00 GMT</pubDate>
+  <source>Example News</source>
+</item>
+<item>
+  <title>반도체 투자 확대 소식</title>
+  <link>https://example.com/b</link>
+</item>
+</channel></rss>
+"""
 
 
 class SignalLogicTest(unittest.TestCase):
@@ -254,6 +304,46 @@ class SignalLogicTest(unittest.TestCase):
 
         self.assertEqual("AVOID_SUPPLY", signal["action_hint"])
         self.assertEqual("high", signal["risk_level"])
+
+
+class EventDetectorTest(unittest.TestCase):
+    def test_force_gpt_intraday_event_requires_confirmations(self):
+        events = detect_gpt_events(_event_summary(return_1bar_pct=1.0, volume_ratio_5=2.4))
+
+        self.assertIn("FORCE_GPT_INTRADAY_EVENT", [event["type"] for event in events])
+
+    def test_force_gpt_intraday_event_does_not_trigger_on_price_only(self):
+        events = detect_gpt_events(_event_summary(return_1bar_pct=1.0, volume_ratio_5=1.0))
+
+        self.assertNotIn("FORCE_GPT_INTRADAY_EVENT", [event["type"] for event in events])
+
+
+class NewsContextFetcherTest(unittest.TestCase):
+    def test_positive_titles_create_low_weight_risk_on_bias(self):
+        with patch("macro_context_fetcher._fetch_text", return_value=NEWS_RSS):
+            context = fetch_news_context(
+                code="000660",
+                name="SK하이닉스",
+                events=[{"type": "FORCE_GPT_INTRADAY_EVENT"}],
+                settings={"NEWS_CONTEXT_MAX_ITEMS": 2},
+            )
+
+        self.assertEqual("crawler_unverified", context["reliability"])
+        self.assertEqual("positive", context["sentiment"])
+        self.assertEqual("risk_on", context["direction_bias"])
+        self.assertEqual(3, context["confidence_adjustment"])
+        self.assertEqual(2, context["source_count"])
+
+    def test_network_failure_returns_failed_context_without_raising(self):
+        with patch("macro_context_fetcher._fetch_text", side_effect=OSError("blocked")):
+            context = fetch_news_context(
+                code="005930",
+                name="삼성전자",
+                events=[{"type": "FORCE_GPT_INTRADAY_EVENT"}],
+            )
+
+        self.assertEqual("crawler_failed", context["reliability"])
+        self.assertIn("notes", context)
 
 
 if __name__ == "__main__":

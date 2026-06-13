@@ -16,6 +16,10 @@ from config import (
     EVENT_VOLUME_RATIO,
     EVENT_VWAP_NEAR_PCT,
     ENABLE_MARKET_FLOW_DIRECTION_RISK,
+    ENABLE_FORCE_GPT_INTRADAY_EVENT,
+    FORCE_GPT_MIN_CONFIRMATIONS,
+    FORCE_GPT_RETURN_1BAR_PCT,
+    FORCE_GPT_VOLUME_RATIO,
 )
 
 
@@ -35,6 +39,7 @@ def detect_gpt_events(summary, settings=None):
     _detect_orderbook_events(events, summary, settings)
     _detect_market_status_events(events, summary)
     _detect_market_flow_events(events, summary, settings)
+    _detect_force_gpt_intraday_event(events, timeframe, summary, settings)
 
     return events
 
@@ -312,6 +317,96 @@ def _detect_market_flow_events(events, summary, settings=None):
                 "weak_etf_count": weak_etf_count,
             },
         })
+
+
+def _detect_force_gpt_intraday_event(events, timeframe, summary, settings=None):
+    """Escalate sudden confirmed intraday moves to GPT review."""
+    if not _setting(
+        settings,
+        "ENABLE_FORCE_GPT_INTRADAY_EVENT",
+        ENABLE_FORCE_GPT_INTRADAY_EVENT
+    ):
+        return
+
+    latest = timeframe.get("latest") or {}
+    volume = timeframe.get("volume") or {}
+    market_context = summary.get("market_context") or {}
+    market_indices = market_context.get("market_indices") or {}
+
+    return_threshold = _setting(
+        settings,
+        "FORCE_GPT_RETURN_1BAR_PCT",
+        FORCE_GPT_RETURN_1BAR_PCT
+    )
+    volume_threshold = _setting(
+        settings,
+        "FORCE_GPT_VOLUME_RATIO",
+        FORCE_GPT_VOLUME_RATIO
+    )
+    min_confirmations = _setting(
+        settings,
+        "FORCE_GPT_MIN_CONFIRMATIONS",
+        FORCE_GPT_MIN_CONFIRMATIONS
+    )
+
+    try:
+        min_confirmations = max(int(min_confirmations), 1)
+    except (TypeError, ValueError):
+        min_confirmations = FORCE_GPT_MIN_CONFIRMATIONS
+
+    return_threshold = _to_float(return_threshold)
+    if return_threshold is None:
+        return_threshold = FORCE_GPT_RETURN_1BAR_PCT
+
+    volume_threshold = _to_float(volume_threshold)
+    if volume_threshold is None:
+        volume_threshold = FORCE_GPT_VOLUME_RATIO
+
+    return_1bar_pct = _to_float(latest.get("return_1bar_pct"))
+    ratio_5 = _to_float(volume.get("volume_ratio_5"))
+    ratio_20 = _to_float(volume.get("volume_ratio_20"))
+    ratios = [ratio for ratio in (ratio_5, ratio_20) if ratio is not None]
+    max_volume_ratio = max(ratios) if ratios else None
+
+    confirmation_reasons = []
+    if return_1bar_pct is not None and abs(return_1bar_pct) >= return_threshold:
+        confirmation_reasons.append("rapid_price_move")
+    if max_volume_ratio is not None and max_volume_ratio >= volume_threshold:
+        confirmation_reasons.append("volume_expansion")
+
+    event_types = {event.get("type") for event in events or []}
+    confirming_event_types = {
+        "VOLUME_SPIKE",
+        "NEAR_BOX_HIGH",
+        "NEAR_BOX_LOW",
+        "MA5_MA20_GOLDEN_CROSS",
+        "MA5_MA20_DEAD_CROSS",
+        "CONSECUTIVE_UP_BARS",
+        "CONSECUTIVE_DOWN_BARS",
+        "MARKET_FOREIGN_SELL_PRESSURE",
+    }
+    if confirming_event_types.intersection(event_types):
+        confirmation_reasons.append("technical_or_flow_event")
+
+    for key in ("kospi200_change_pct", "kosdaq150_change_pct"):
+        index_change = _to_float(market_indices.get(key))
+        if index_change is not None and abs(index_change) >= return_threshold:
+            confirmation_reasons.append("market_index_move")
+            break
+
+    if len(set(confirmation_reasons)) < min_confirmations:
+        return
+
+    events.append({
+        "type": "FORCE_GPT_INTRADAY_EVENT",
+        "timeframe": "1m",
+        "message": "Sudden intraday move with confirmation; force GPT review",
+        "value": {
+            "return_1bar_pct": return_1bar_pct,
+            "max_volume_ratio": max_volume_ratio,
+            "confirmations": sorted(set(confirmation_reasons)),
+        },
+    })
 
 
 def _to_float(value):
