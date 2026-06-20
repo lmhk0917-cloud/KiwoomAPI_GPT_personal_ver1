@@ -320,7 +320,7 @@ class EventDetectorTest(unittest.TestCase):
 
 class NewsContextFetcherTest(unittest.TestCase):
     def test_positive_titles_create_low_weight_risk_on_bias(self):
-        with patch("macro_context_fetcher._fetch_text", return_value=NEWS_RSS):
+        with patch("macro_context_fetcher._fetch_html", return_value=NEWS_RSS):
             context = fetch_news_context(
                 code="000660",
                 name="SK하이닉스",
@@ -335,7 +335,7 @@ class NewsContextFetcherTest(unittest.TestCase):
         self.assertEqual(2, context["source_count"])
 
     def test_network_failure_returns_failed_context_without_raising(self):
-        with patch("macro_context_fetcher._fetch_text", side_effect=OSError("blocked")):
+        with patch("macro_context_fetcher._fetch_html", side_effect=OSError("blocked")):
             context = fetch_news_context(
                 code="005930",
                 name="삼성전자",

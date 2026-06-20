@@ -209,7 +209,7 @@ class Notifier:
                     signal.get("confidence_score"),
                     self._risk_label(signal.get("risk_level")),
                 ),
-                "기준: 손절={} / 목표1={} / 목표2={}".format(
+                "관찰 기준선: 하단={} / 1차상단={} / 2차상단={}".format(
                     self._format_value(signal.get("stop_loss")),
                     self._format_value(signal.get("target_1")),
                     self._format_value(signal.get("target_2")),

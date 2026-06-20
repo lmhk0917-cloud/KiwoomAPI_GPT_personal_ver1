@@ -76,8 +76,13 @@ class TeeStream:
         self.log_file.write(message)
 
     def flush(self):
-        self.stream.flush()
-        self.log_file.flush()
+        for target in (self.stream, self.log_file):
+            try:
+                target.flush()
+            except OSError:
+                # Console handles can become invalid after a parent PowerShell
+                # process times out, but logging must not stop market analysis.
+                pass
 
     def isatty(self):
         return self.stream.isatty()

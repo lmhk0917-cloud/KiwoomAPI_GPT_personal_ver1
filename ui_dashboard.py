@@ -5,6 +5,7 @@ watchlist management. Kiwoom login and realtime collection stay in ``main.py``.
 """
 
 import argparse
+import json
 import os
 import sqlite3
 import sys
@@ -32,7 +33,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from app_paths import DEFAULT_DB_PATH
+from app_paths import DATA_DIR, DEFAULT_DB_PATH, ensure_app_dirs
 from settings_store import SettingsStore
 from ui.labels import (
     COLUMN_LABELS,
@@ -43,6 +44,25 @@ from ui.labels import (
     VALUE_LABELS_BY_COLUMN,
 )
 from ui.widgets import IndicatorGaugeWidget, PriceVolumeChart
+
+
+WATCHLIST_FILE_PATH = os.path.join(DATA_DIR, "watchlist.json")
+
+
+def save_watchlist_file(watch_codes, path=WATCHLIST_FILE_PATH):
+    """Persist a visible watchlist JSON snapshot next to the runtime DB."""
+    ensure_app_dirs()
+    payload = {
+        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f"),
+        "source": "ui_dashboard",
+        "watch_codes": dict(sorted((watch_codes or {}).items())),
+    }
+    temp_path = path + ".tmp"
+    with open(temp_path, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
+        handle.write("\n")
+    os.replace(temp_path, path)
+    return path
 
 
 class Dashboard(QWidget):
@@ -1070,15 +1090,22 @@ class Dashboard(QWidget):
                 watch_codes[code] = name or code
 
             settings_store = SettingsStore(db_path=self.db_path)
-            settings_store.update_setting("WATCH_CODES", watch_codes)
-            settings_store.close()
+            try:
+                settings_store.update_setting("WATCH_CODES", watch_codes)
+            finally:
+                settings_store.close()
+            watchlist_path = save_watchlist_file(watch_codes)
 
             QMessageBox.information(
                 self,
                 "관심종목",
-                "관심종목을 저장했습니다. main.py 실행 중 다음 분석 사이클부터 적용됩니다."
+                "관심종목을 저장했습니다.\n{}\nmain.py 실행 중 다음 분석 사이클부터 적용됩니다.".format(
+                    watchlist_path
+                )
             )
-            self.watchlist_status_label.setText("{}개 관심종목을 저장했습니다.".format(len(watch_codes)))
+            self.watchlist_status_label.setText(
+                "{}개 관심종목을 저장했습니다. 파일: {}".format(len(watch_codes), watchlist_path)
+            )
             self.refresh_watchlist()
             self.refresh_settings()
         except Exception as exc:

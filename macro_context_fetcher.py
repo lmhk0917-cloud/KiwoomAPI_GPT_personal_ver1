@@ -160,7 +160,7 @@ def fetch_news_context(code, name, events=None, summary=None, settings=None):
 
     try:
         url = url_template.format(query=urllib.parse.quote_plus(query))
-        xml_text = _fetch_text(url, timeout)
+        xml_text = _fetch_html(url, timeout)
         items = _parse_news_rss_items(xml_text, max_items)
     except Exception as exc:
         result["reliability"] = "crawler_failed"

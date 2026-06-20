@@ -374,7 +374,8 @@ def _build_cost_context(summary, settings=None):
     )
 
     result = {
-        "entry_price": entry_price,
+        "entry_price": _price_value(entry_price),
+        "entry_price_krw_text": _price_text(entry_price),
         "assumptions_pct": {
             "buy_fee": buy_fee_pct,
             "sell_fee": sell_fee_pct,
@@ -388,8 +389,10 @@ def _build_cost_context(summary, settings=None):
     if entry_price is None:
         return result
 
+    breakeven_price = _price_after_pct(entry_price, round_trip_cost_pct)
     result.update({
-        "breakeven_exit_price": _price_after_pct(entry_price, round_trip_cost_pct),
+        "breakeven_exit_price": _price_value(breakeven_price),
+        "breakeven_exit_price_krw_text": _price_text(breakeven_price),
         "target_1": _cost_adjusted_level(entry_price, target_1, round_trip_cost_pct),
         "target_2": _cost_adjusted_level(entry_price, target_2, round_trip_cost_pct),
         "stop_loss": _cost_adjusted_level(entry_price, stop_loss, round_trip_cost_pct),
@@ -426,7 +429,8 @@ def _cost_adjusted_level(entry_price, exit_price, round_trip_cost_pct):
     net_return_pct = round(gross_return_pct - round_trip_cost_pct, 3)
 
     return {
-        "price": exit_price,
+        "price": _price_value(exit_price),
+        "price_krw_text": _price_text(exit_price),
         "gross_return_pct": gross_return_pct,
         "net_return_after_cost_pct": net_return_pct,
     }
@@ -436,6 +440,24 @@ def _price_after_pct(price, pct):
     if price is None:
         return None
     return round(price * (1 + pct / 100.0), 2)
+
+
+def _price_value(price):
+    """Return a stable KRW price number without meaningless decimals."""
+    value = _to_float(price)
+    if value is None:
+        return None
+    return int(round(value))
+
+
+def _price_text(price):
+    """Return an explicit display string so GPT does not shift price digits."""
+    value = _price_value(price)
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return "{:,} KRW".format(value)
+    return "{:,} KRW".format(int(round(value)))
 
 
 def _compress_sector_context(section, max_items):

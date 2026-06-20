@@ -139,12 +139,36 @@ def parse_args():
         default="09:10",
         help="After this local HH:MM, login/register success with no ticks is treated as market closed/no session.",
     )
+    parser.add_argument(
+        "--allow-tick-only-runtime",
+        action="store_true",
+        help="Temporary guard bypass for an explicitly requested tick-only supervisor run.",
+    )
     return parser.parse_args()
+
+
+def is_tick_only_runtime_allowed(args):
+    """Return True only when the temporary direct-run guard is explicitly bypassed."""
+    return bool(args.allow_tick_only_runtime or os.environ.get("KIWOOM_ALLOW_TICK_ONLY") == "1")
+
+
+def normalize_attempt_seconds(args):
+    """Keep the temporary tick-only supervisor from relogging every few minutes."""
+    if args.allow_tick_only_runtime and args.attempt_seconds and args.attempt_seconds > 0:
+        print("SUPERVISOR_ATTEMPT_SECONDS_OVERRIDDEN={}=>0".format(args.attempt_seconds))
+        args.attempt_seconds = 0
+    return args.attempt_seconds
 
 
 def main():
     args = parse_args()
     setup_runtime_logging("intraday_supervisor")
+    if not is_tick_only_runtime_allowed(args):
+        print("SUPERVISOR_ABORTED=tick_only_disabled")
+        print("SUPERVISOR_GUARD=explicit_tick_only_required")
+        return 30
+    normalize_attempt_seconds(args)
+
     print("SUPERVISOR_STARTED_AT={}".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
     print("SUPERVISOR_UNTIL={}".format(args.until))
     print("SUPERVISOR_MARKET_OPEN={}".format(args.market_open))
