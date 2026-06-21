@@ -28,8 +28,18 @@ __pycache__/
 logs/
 exports/
 
+# Operational notes and generated reviews
+GPT_FEEDBACK_CURRENT.md
+INTRADAY_TEST_*.md
+MORNING_TEST_*.md
+OPTIMIZATION_REVIEW_*.md
+external_context_gapfill_*.json
+
 # Runtime/local state
 market_context.json
+watchlists/*.json
+!watchlists/*.example.json
+!watchlists/.gitkeep
 openapi_bootstrap.disabled
 archive/
 codex_new_chat_prompt_*.md
