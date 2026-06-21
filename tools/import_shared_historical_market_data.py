@@ -14,7 +14,11 @@ from app_paths import DEFAULT_DB_PATH
 from data_store import TickStore
 
 
-DEFAULT_PACKAGE = r"C:\Users\lmhk2\Documents\New project\market_data_exports\shared\historical_market_data_v1.json"
+DEFAULT_PACKAGE = (
+    r"C:\Users\lmhk2\Documents\New project\market_data_exports\daily_history"
+    r"\yahoo_finance_10y_ai_semiconductor_1d\shared"
+    r"\historical_market_data_v1_daily_kr_us_ai_semiconductor.json"
+)
 
 
 def main():
