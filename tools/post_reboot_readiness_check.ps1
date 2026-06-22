@@ -8,7 +8,7 @@ $ErrorActionPreference = "Continue"
 $startedAt = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
 $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $TossRoot = "C:\Users\lmhk2\Documents\New project\toss_trading_runtime"
-$ContestRoot = "C:\Users\lmhk2\PycharmProjects\KiwoomAPI_GPT_contestver"
+$ContestRoot = "C:\Users\lmhk2\PycharmProjects\Kiwoom_Screening_Assistant"
 
 Write-Host "POST_REBOOT_READINESS_STARTED=$startedAt"
 Write-Host "KIWOOM_ROOT=$Root"

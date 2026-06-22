@@ -609,6 +609,7 @@ def _compress_learning_feedback(feedback):
     return _drop_empty({
         "regime_note": feedback.get("regime_note"),
         "guidance": feedback.get("guidance"),
+        "quant_snapshot": _compress_quant_snapshot(feedback.get("quant_snapshot")),
         "avoid_actions": _drop_empty_list([
             _compact_dict(item, [
                 "action_hint",
@@ -629,6 +630,47 @@ def _compress_learning_feedback(feedback):
                 "adjustment",
             ])
             for item in _head(feedback.get("prefer_actions"), 3)
+        ]),
+    })
+
+
+def _compress_quant_snapshot(snapshot):
+    snapshot = snapshot or {}
+    guidance = snapshot.get("guidance") or {}
+    return _drop_empty({
+        "generated_at": snapshot.get("generated_at"),
+        "window_start": snapshot.get("window_start"),
+        "overview": _compact_dict(snapshot.get("overview"), [
+            "signal_count",
+            "evaluated_count",
+            "avg_net_return_60m_pct",
+            "profit_factor_60m",
+            "expectancy_60m_pct",
+            "stop_loss_hit_rate_pct",
+        ]),
+        "label": guidance.get("label"),
+        "summary": guidance.get("summary"),
+        "avoid_actions": _drop_empty_list([
+            _compact_dict(item, [
+                "action_hint",
+                "evaluated_count",
+                "avg_net_return_60m_pct",
+                "win_rate_60m_pct",
+                "profit_factor_60m",
+                "adjustment",
+            ])
+            for item in _head(guidance.get("avoid_actions"), 3)
+        ]),
+        "prefer_actions": _drop_empty_list([
+            _compact_dict(item, [
+                "action_hint",
+                "evaluated_count",
+                "avg_net_return_60m_pct",
+                "win_rate_60m_pct",
+                "profit_factor_60m",
+                "adjustment",
+            ])
+            for item in _head(guidance.get("prefer_actions"), 2)
         ]),
     })
 

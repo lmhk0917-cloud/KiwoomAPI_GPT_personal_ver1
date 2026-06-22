@@ -115,6 +115,52 @@ class KiwoomFocusedDashboardTests(unittest.TestCase):
                 "success", 1, "005930", "test", 5000, 100, 100, 80,
                 0.8, 10, 20, 30, None, "ok",
             ))
+            conn.execute("""
+                INSERT INTO quant_signal_scores (
+                    signal_id, scored_at, code, action_hint, quant_signal_score,
+                    expected_value_score, market_risk_score, final_quant_score,
+                    decision_side, feature_json, formula_version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                1, "2026-06-22 09:00:10.000000", "005930", "OBSERVE_EVENT",
+                52.0, 48.0, 35.0, 50.5, "caution_or_avoid", "{}", "test",
+            ))
+            conn.execute("""
+                INSERT INTO gpt_analysis_scores (
+                    gpt_call_id, analyzed_at, code, parse_status, decision,
+                    risk_score, gpt_context_score, breakout_score, trend_score,
+                    confidence, risk_flags_json, invalid_condition, summary,
+                    entry_plan, raw_json, error_message
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                1, "2026-06-22 09:01:05.000000", "005930", "ok", "watch",
+                42.0, 61.0, 30.0, 55.0, 70.0, "[]", None,
+                "structured score", "observe only", "{}", None,
+            ))
+            feedback_payload = {
+                "overview": {
+                    "signal_count": 1,
+                    "evaluated_count": 1,
+                    "win_rate_60m_pct": 100.0,
+                    "avg_net_return_60m_pct": 0.09,
+                    "profit_factor_60m": 999.0,
+                }
+            }
+            feedback_guidance = {
+                "label": "positive_expectancy",
+                "summary": "test guidance",
+            }
+            conn.execute("""
+                INSERT INTO quant_feedback_snapshots (
+                    generated_at, scope, code, window_start, window_end,
+                    min_sample, signal_count, evaluated_count,
+                    payload_json, guidance_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                "2026-06-22 10:01:00.000000", "code", "005930",
+                "2026-06-22 00:00:00.000000", "2026-06-22 10:00:00.000000",
+                1, 1, 1, json.dumps(feedback_payload), json.dumps(feedback_guidance),
+            ))
             conn.commit()
         finally:
             conn.close()
@@ -124,8 +170,20 @@ class KiwoomFocusedDashboardTests(unittest.TestCase):
             html = render_dashboard_html(snapshot)
             self.assertEqual("005930", snapshot["rows"][0]["code"])
             self.assertEqual("OBSERVE_EVENT", snapshot["rows"][0]["action"])
+            self.assertEqual("2026-06-22 10:01:00.000000", snapshot["latest"]["quant_feedback_snapshots"])
+            self.assertEqual(1, len(snapshot["recent_score_compare"]))
+            self.assertEqual("watch", snapshot["recent_score_compare"][0]["gpt_decision"])
+            self.assertEqual(4, len(snapshot["horizon_summary"]))
+            self.assertEqual(5, snapshot["horizon_summary"][0]["horizon_min"])
+            self.assertEqual(1, snapshot["horizon_summary"][0]["evaluated_count"])
+            self.assertGreaterEqual(len(snapshot["target_exit_scenarios"]), 1)
+            self.assertEqual("positive_expectancy", snapshot["recent_quant_feedback"][0]["quality_label"])
             self.assertIn("Kiwoom Focused Dashboard", html)
             self.assertIn("005930", html)
+            self.assertIn("Horizon Summary", html)
+            self.assertIn("Target Exit Scenarios", html)
+            self.assertIn("Quant / GPT / Paper", html)
+            self.assertIn("positive_expectancy", html)
         finally:
             os.unlink(db_path)
 

@@ -1,6 +1,6 @@
 param(
-  [string]$TaskName = "KiwoomOpenAPIBootstrap",
-  [string]$ProjectDir = "C:\Users\lmhk2\PycharmProjects\KiwoomAPI_GPT_personal_ver1",
+  [string]$TaskName = "KiwoomCoreQuantOpenAPIBootstrap",
+  [string]$ProjectDir = "C:\Users\lmhk2\PycharmProjects\Kiwoom_Core_Quant_Lab",
   [string]$StartTime = "08:45",
   [switch]$Unregister
 )

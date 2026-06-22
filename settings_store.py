@@ -33,6 +33,42 @@ DEFAULT_SETTINGS = [
         "Minimum in-memory ticks required before analysis starts.",
     ),
     (
+        "MARKET_REGULAR_CLOSE_TIME",
+        "str",
+        config.MARKET_REGULAR_CLOSE_TIME,
+        "Local regular-session close time in HH:MM.",
+    ),
+    (
+        "POST_MARKET_FEEDBACK_TIME",
+        "str",
+        config.POST_MARKET_FEEDBACK_TIME,
+        "Local time in HH:MM after which paper/quant feedback runs once.",
+    ),
+    (
+        "ENABLE_POST_MARKET_FEEDBACK",
+        "bool",
+        config.ENABLE_POST_MARKET_FEEDBACK,
+        "Run post-market paper and quant feedback once after market close.",
+    ),
+    (
+        "POST_MARKET_FEEDBACK_LOOKBACK_DAYS",
+        "int",
+        config.POST_MARKET_FEEDBACK_LOOKBACK_DAYS,
+        "Days included in quant feedback snapshots generated after close.",
+    ),
+    (
+        "POST_MARKET_FEEDBACK_MIN_SAMPLE",
+        "int",
+        config.POST_MARKET_FEEDBACK_MIN_SAMPLE,
+        "Minimum samples before action-level quant feedback is trusted.",
+    ),
+    (
+        "POST_MARKET_STOP_ANALYSIS_AFTER_FINALIZE",
+        "bool",
+        config.POST_MARKET_STOP_ANALYSIS_AFTER_FINALIZE,
+        "Stop the analysis timer after post-market feedback finalizes.",
+    ),
+    (
         "ENABLE_EVENT_FILTER",
         "bool",
         config.ENABLE_EVENT_FILTER,

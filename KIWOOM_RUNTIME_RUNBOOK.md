@@ -19,7 +19,7 @@ attempts unless a runbook step says otherwise.
 The scheduled task is:
 
 ```powershell
-KiwoomGPTPersonalMarketDayIntegration
+KiwoomCoreQuantMarketDayIntegration
 ```
 
 Expected action:

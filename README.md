@@ -1,20 +1,22 @@
-# Kiwoom GPT Personal Market Analysis System
+# Kiwoom Core Quant Lab
 
-Kiwoom OpenAPI+ realtime market data and OpenAI GPT analysis are connected into
-a personal Korean stock-market analysis system. The system collects live ticks,
-builds multi-timeframe summaries, detects meaningful events, calls GPT only
-when needed, and stores results for review and paper-trade feedback.
+This project is the focused-symbol, traditional-quant branch of the Kiwoom
+workspace. It uses Kiwoom OpenAPI+ realtime and historical data to analyze a
+small set of core Korean equities deeply, with deterministic indicators,
+factor-style scoring, backtests, risk/reward checks, and post-session feedback.
 
-This is not an automated trading bot. The current goal is risk/reward analysis,
-signal review, data collection, and validation.
+This is not an automated trading bot and not a broad market screener. GPT is a
+reviewer and report assistant, while deterministic quant logic remains
+responsible for signals, scoring, validation, and risk controls.
 
 ## Project Goals
 
 - Build a reliable realtime data pipeline under Kiwoom OpenAPI+ and 32-bit Python constraints.
 - Store raw ticks, generated events, GPT calls, notifications, signal logs, and paper-trade evaluations in SQLite.
 - Analyze a small fixed watchlist deeply instead of screening the full market broadly.
+- Move toward traditional quant investment workflow: factor definitions, signal scoring, backtest evidence, hit ratio, drawdown, risk/reward, and position sizing.
 - Keep deterministic code responsible for collection, indicators, event detection, logging, and validation.
-- Use GPT as a reviewer that explains risk/reward, conflicting evidence, and missing data.
+- Use GPT only as a reviewer that explains risk/reward, conflicting evidence, missing data, and report wording.
 - Improve signal quality through repeated market-session tests and paper-trade feedback.
 
 ## Technical Context
@@ -100,7 +102,7 @@ as an order trigger.
 The default automatic task is:
 
 ```powershell
-KiwoomGPTPersonalMarketDayIntegration
+KiwoomCoreQuantMarketDayIntegration
 ```
 
 It runs the full integration path:

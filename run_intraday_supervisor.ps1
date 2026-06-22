@@ -5,7 +5,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$ProjectDir = "C:\Users\lmhk2\PycharmProjects\KiwoomAPI_GPT_personal_ver1"
+$ProjectDir = "C:\Users\lmhk2\PycharmProjects\Kiwoom_Core_Quant_Lab"
 $Conda = "C:\Users\lmhk2\anaconda3\Scripts\conda.exe"
 
 Set-Location $ProjectDir

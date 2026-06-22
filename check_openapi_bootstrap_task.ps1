@@ -1,6 +1,6 @@
 param(
-  [string]$OpenApiTaskName = "KiwoomOpenAPIBootstrap",
-  [string]$MarketTaskName = "KiwoomGPTPersonalMarketDayIntegration"
+  [string]$OpenApiTaskName = "KiwoomCoreQuantOpenAPIBootstrap",
+  [string]$MarketTaskName = "KiwoomCoreQuantMarketDayIntegration"
 )
 
 $ErrorActionPreference = "Stop"

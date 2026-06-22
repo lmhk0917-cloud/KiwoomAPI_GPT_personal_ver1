@@ -1,5 +1,5 @@
 param(
-  [string]$ProjectDir = "C:\Users\lmhk2\PycharmProjects\KiwoomAPI_GPT_personal_ver1",
+  [string]$ProjectDir = "C:\Users\lmhk2\PycharmProjects\Kiwoom_Core_Quant_Lab",
   [string]$Conda = "C:\Users\lmhk2\anaconda3\Scripts\conda.exe",
   [string]$CondaEnv = "py37_32",
   [string]$MarketOpen = "09:00",

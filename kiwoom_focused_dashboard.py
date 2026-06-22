@@ -8,13 +8,17 @@ import sqlite3
 import sys
 import tkinter as tk
 import webbrowser
-from datetime import datetime
+from datetime import datetime, timedelta
 from tkinter import ttk
 
 from app_paths import DEFAULT_DB_PATH, EXPORTS_DIR
+from config import TRADE_BUY_FEE_PCT, TRADE_SELL_FEE_PCT, TRADE_SELL_TAX_PCT, TRADE_SLIPPAGE_PCT
+from target_exit_scenarios import build_target_exit_scenarios
 
 
 DEFAULT_SYMBOLS = ["005930", "000660"]
+ROUND_TRIP_COST_PCT = TRADE_BUY_FEE_PCT + TRADE_SELL_FEE_PCT + TRADE_SELL_TAX_PCT + (TRADE_SLIPPAGE_PCT * 2)
+HORIZONS_MIN = (5, 10, 30, 60)
 DEFAULT_HTML_PATH = os.path.join(EXPORTS_DIR, "kiwoom_dashboard_latest.html")
 DEFAULT_SYMBOLS_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
@@ -64,6 +68,10 @@ def build_dashboard_snapshot(db_path=DEFAULT_DB_PATH, symbols=None):
                 "contexts": _recent_contexts(conn, code=code, limit=12),
                 "tick_series": _recent_ticks(conn, code=code, limit=120),
                 "score_history": _recent_signal_scores(conn, code=code, limit=12),
+                "score_compare_rows": _recent_score_compare(conn, code=code, limit=16),
+                "quant_feedback": _recent_quant_feedback(conn, code=code, limit=8),
+                "horizon_summary": _horizon_summary(conn, code=code),
+                "target_exit_scenarios": build_target_exit_scenarios(conn, code=code),
             })
 
         return {
@@ -78,6 +86,10 @@ def build_dashboard_snapshot(db_path=DEFAULT_DB_PATH, symbols=None):
             "recent_signals": _recent_signals(conn, limit=30),
             "recent_paper": _recent_paper(conn, limit=30),
             "recent_contexts": _recent_contexts(conn, limit=30),
+            "recent_score_compare": _recent_score_compare(conn, limit=30),
+            "recent_quant_feedback": _recent_quant_feedback(conn, limit=30),
+            "horizon_summary": _horizon_summary(conn),
+            "target_exit_scenarios": build_target_exit_scenarios(conn),
             "latest_gpt_call": _latest_gpt_call(conn),
         }
     finally:
@@ -89,6 +101,10 @@ def render_dashboard_html(snapshot):
     events_html = "\n".join(_event_html(row) for row in snapshot.get("recent_events") or [])
     context_html = "\n".join(_context_html(row) for row in snapshot.get("recent_contexts") or [])
     paper_html = "\n".join(_paper_html(row) for row in snapshot.get("recent_paper") or [])
+    score_html = "\n".join(_score_compare_html(row) for row in snapshot.get("recent_score_compare") or [])
+    quant_feedback_html = "\n".join(_quant_feedback_html(row) for row in snapshot.get("recent_quant_feedback") or [])
+    horizon_html = "\n".join(_horizon_html(row) for row in snapshot.get("horizon_summary") or [])
+    target_exit_html = "\n".join(_target_exit_html(row) for row in snapshot.get("target_exit_scenarios") or [])
     table_html = "\n".join(
         "<tr><td>{}</td><td class=\"num\">{}</td></tr>".format(_e(key), _e(value))
         for key, value in sorted((snapshot.get("tables") or {}).items())
@@ -165,6 +181,10 @@ th {{ color:#344054; font-size:12px; background:#f9fafb; }}
   </section>
   <section><h2>Events By Symbol</h2><table><thead><tr><th>Time</th><th>Symbol</th><th>Event</th><th>Severity</th><th class="num">Value</th><th>Message</th></tr></thead><tbody>{events_html}</tbody></table></section>
   <section><h2>Paper Feedback</h2><table><thead><tr><th>Created</th><th>Symbol</th><th class="num">Horizon</th><th class="num">Anchor</th><th>Status</th><th class="num">Return</th><th class="num">Max</th><th class="num">Min</th><th>Outcome</th></tr></thead><tbody>{paper_html}</tbody></table></section>
+  <section><h2>Horizon Summary</h2><table><thead><tr><th class="num">Min</th><th class="num">Evaluated</th><th class="num">Avg</th><th class="num">Net</th><th class="num">Win</th><th class="num">Best</th><th class="num">Worst</th></tr></thead><tbody>{horizon_html}</tbody></table></section>
+  <section><h2>Target Exit Scenarios</h2><table><thead><tr><th class="num">Min</th><th class="num">Target</th><th class="num">Stop</th><th class="num">Evaluated</th><th class="num">Target First</th><th class="num">Stop First</th><th class="num">Timeout</th><th class="num">Win</th><th class="num">Net</th></tr></thead><tbody>{target_exit_html}</tbody></table></section>
+  <section><h2>Quant / GPT / Paper</h2><table><thead><tr><th>Time</th><th>Symbol</th><th>Action</th><th class="num">Quant</th><th class="num">EV</th><th class="num">Risk</th><th>GPT</th><th class="num">GPT Conf</th><th class="num">GPT Risk</th><th class="num">Ret60</th><th>Outcome</th></tr></thead><tbody>{score_html}</tbody></table></section>
+  <section><h2>Quant Feedback</h2><table><thead><tr><th>Created</th><th>Scope</th><th>Symbol</th><th>Label</th><th class="num">Signals</th><th class="num">Evaluated</th><th class="num">Win</th><th class="num">Net60</th><th class="num">PF</th><th>Action</th></tr></thead><tbody>{quant_feedback_html}</tbody></table></section>
   <section><h2>Context</h2><table><thead><tr><th>Time</th><th>Scope</th><th>Symbol</th><th>Section</th><th>Reliability</th><th>Summary</th></tr></thead><tbody>{context_html}</tbody></table></section>
   <section><h2>Tables</h2><table><tbody>{table_html}</tbody></table></section>
 </main>
@@ -181,6 +201,10 @@ th {{ color:#344054; font-size:12px; background:#f9fafb; }}
         rows_html=rows_html,
         events_html=events_html,
         paper_html=paper_html,
+        horizon_html=horizon_html,
+        target_exit_html=target_exit_html,
+        score_html=score_html,
+        quant_feedback_html=quant_feedback_html,
         context_html=context_html,
         table_html=table_html,
     )
@@ -250,6 +274,7 @@ class KiwoomFocusedDashboard(object):
         self.metric_vars = {}
         for key, label in [
             ("health", "Health"),
+            ("latest_tick", "Latest Tick"),
             ("latest_analysis", "Latest Analysis"),
             ("tokens", "Tokens"),
             ("warnings", "Warnings"),
@@ -309,6 +334,26 @@ class KiwoomFocusedDashboard(object):
         self.tables_text = self._add_text_tab(bottom, "Tables", monospace=True)
         self.runtime_events_tree = self._add_runtime_table(runtime_frame, "Events", ("time", "symbol", "event", "severity", "value", "message"))
         self.runtime_signals_tree = self._add_runtime_table(runtime_frame, "Signals", ("time", "symbol", "decision", "score", "risk", "reason"))
+        self.runtime_horizon_tree = self._add_runtime_table(
+            runtime_frame,
+            "Horizon Summary",
+            ("min", "evaluated", "avg", "net", "win", "best", "worst"),
+        )
+        self.runtime_target_exit_tree = self._add_runtime_table(
+            runtime_frame,
+            "Target Exit Scenarios",
+            ("min", "target", "stop", "evaluated", "target_first", "stop_first", "timeout", "win", "net"),
+        )
+        self.runtime_score_compare_tree = self._add_runtime_table(
+            runtime_frame,
+            "Quant / GPT / Paper",
+            ("time", "symbol", "action", "quant", "ev", "risk", "gpt", "gpt_conf", "gpt_risk", "ret60", "outcome"),
+        )
+        self.runtime_quant_feedback_tree = self._add_runtime_table(
+            runtime_frame,
+            "Quant Feedback",
+            ("created", "scope", "symbol", "label", "signals", "evaluated", "win", "net60", "pf", "action"),
+        )
         self.runtime_context_tree = self._add_runtime_table(runtime_frame, "Context", ("time", "scope", "symbol", "section", "reliability", "summary"))
 
     def _add_text_tab(self, notebook, title, monospace=False):
@@ -387,11 +432,14 @@ class KiwoomFocusedDashboard(object):
         warnings = health.get("warnings") or []
         self.meta_var.set("Generated {} | DB {}".format(snapshot.get("generated_at"), snapshot.get("db_path")))
         self.metric_vars["health"].set(health.get("status") or "unknown")
+        self.metric_vars["latest_tick"].set(latest.get("ticks") or "none")
         self.metric_vars["latest_analysis"].set(latest.get("analysis_results") or "none")
         latest_gpt = snapshot.get("latest_gpt_call") or {}
         self.metric_vars["tokens"].set(str(latest_gpt.get("total_tokens") or 0))
         self.metric_vars["warnings"].set(str(len(warnings)))
 
+        selected = self.symbol_tree.selection()
+        selected_code = selected[0] if selected else None
         self.symbol_tree.delete(*self.symbol_tree.get_children())
         for row in snapshot.get("rows") or []:
             paper = row.get("paper") or {}
@@ -411,15 +459,20 @@ class KiwoomFocusedDashboard(object):
                 "-",
             ))
         children = self.symbol_tree.get_children()
-        if children and not self.symbol_tree.selection():
-            self.symbol_tree.selection_set(children[0])
-            self._show_symbol(children[0])
+        if children:
+            code_to_show = selected_code if selected_code in children else children[0]
+            self.symbol_tree.selection_set(code_to_show)
+            self._show_symbol(code_to_show)
 
         self._render_events()
         self._fill_paper(self.paper_tree, snapshot.get("recent_paper") or [])
         self._fill_context(self.context_tree, snapshot.get("recent_contexts") or [])
         self._fill_runtime_events(self.runtime_events_tree, snapshot.get("recent_events") or [])
         self._fill_runtime_signals(self.runtime_signals_tree, snapshot.get("recent_signals") or [])
+        self._fill_horizon_summary(self.runtime_horizon_tree, snapshot.get("horizon_summary") or [])
+        self._fill_target_exit_scenarios(self.runtime_target_exit_tree, snapshot.get("target_exit_scenarios") or [])
+        self._fill_score_compare(self.runtime_score_compare_tree, snapshot.get("recent_score_compare") or [])
+        self._fill_quant_feedback(self.runtime_quant_feedback_tree, snapshot.get("recent_quant_feedback") or [])
         self._fill_context(self.runtime_context_tree, snapshot.get("recent_contexts") or [])
         self._set_text(self.tables_text, self._tables_text())
 
@@ -595,6 +648,67 @@ class KiwoomFocusedDashboard(object):
                 row.get("reason_json"),
             ))
 
+    def _fill_score_compare(self, tree, rows):
+        tree.delete(*tree.get_children())
+        for idx, row in enumerate(rows):
+            tree.insert("", "end", iid=str(idx), values=(
+                row.get("scored_at"),
+                row.get("code"),
+                row.get("action_hint"),
+                _fmt(row.get("final_quant_score"), 1),
+                _fmt(row.get("expected_value_score"), 1),
+                _fmt(row.get("market_risk_score"), 1),
+                row.get("gpt_decision") or "-",
+                _fmt(row.get("gpt_confidence"), 1),
+                _fmt(row.get("gpt_risk_score"), 1),
+                _fmt(row.get("return_60m_pct"), 4, signed=True),
+                row.get("outcome_label") or "",
+            ))
+
+    def _fill_horizon_summary(self, tree, rows):
+        tree.delete(*tree.get_children())
+        for idx, row in enumerate(rows):
+            tree.insert("", "end", iid=str(idx), values=(
+                row.get("horizon_min"),
+                row.get("evaluated_count"),
+                _fmt(row.get("avg_return_pct"), 4, signed=True),
+                _fmt(row.get("avg_net_return_pct"), 4, signed=True),
+                _fmt(row.get("win_rate_pct"), 2),
+                _fmt(row.get("best_return_pct"), 4, signed=True),
+                _fmt(row.get("worst_return_pct"), 4, signed=True),
+            ))
+
+    def _fill_target_exit_scenarios(self, tree, rows):
+        tree.delete(*tree.get_children())
+        for idx, row in enumerate(rows):
+            tree.insert("", "end", iid=str(idx), values=(
+                row.get("horizon_min"),
+                _fmt(row.get("target_pct"), 2, signed=True),
+                _fmt(row.get("stop_pct"), 2),
+                row.get("evaluated_count"),
+                _fmt(row.get("target_first_rate_pct"), 2),
+                _fmt(row.get("stop_first_rate_pct"), 2),
+                row.get("timeout_count"),
+                _fmt(row.get("win_rate_pct"), 2),
+                _fmt(row.get("avg_net_exit_return_pct"), 4, signed=True),
+            ))
+
+    def _fill_quant_feedback(self, tree, rows):
+        tree.delete(*tree.get_children())
+        for idx, row in enumerate(rows):
+            tree.insert("", "end", iid=str(idx), values=(
+                row.get("generated_at"),
+                row.get("scope"),
+                row.get("code") or "GLOBAL",
+                row.get("quality_label"),
+                row.get("signal_count"),
+                row.get("evaluated_count"),
+                _fmt(row.get("win_rate_60m"), 4),
+                _fmt(row.get("avg_net_return_60m_pct"), 4, signed=True),
+                _fmt(row.get("profit_factor_60m"), 3),
+                row.get("recommended_action") or "",
+            ))
+
     def _render_events(self):
         if not hasattr(self, "event_tree"):
             return
@@ -726,7 +840,8 @@ def _table_counts(conn):
     result = {}
     for table in [
         "ticks", "analysis_results", "event_logs", "signal_logs",
-        "gpt_call_logs", "paper_trade_results", "market_context_snapshots",
+        "gpt_call_logs", "gpt_analysis_scores", "quant_signal_scores",
+        "quant_feedback_snapshots", "paper_trade_results", "market_context_snapshots",
         "notification_logs", "historical_bars",
     ]:
         try:
@@ -743,6 +858,9 @@ def _latest_times(conn):
         "event_logs": "detected_at",
         "signal_logs": "detected_at",
         "gpt_call_logs": "started_at",
+        "gpt_analysis_scores": "analyzed_at",
+        "quant_signal_scores": "scored_at",
+        "quant_feedback_snapshots": "generated_at",
         "paper_trade_results": "evaluated_at",
         "market_context_snapshots": "collected_at",
     }
@@ -920,6 +1038,126 @@ def _recent_signal_scores(conn, code=None, limit=12):
     return [dict(row) for row in reversed(rows)]
 
 
+def _horizon_summary(conn, code=None, days=5):
+    since = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S.%f")
+    code_filter = ""
+    params_tail = [since]
+    if code:
+        code_filter = "AND q.code = ?"
+        params_tail.append(code)
+
+    rows = []
+    for minutes in HORIZONS_MIN:
+        column = "return_{}m_pct".format(minutes)
+        try:
+            row = conn.execute("""
+                SELECT
+                    ? AS horizon_min,
+                    SUM(CASE WHEN p.{column} IS NOT NULL THEN 1 ELSE 0 END) AS evaluated_count,
+                    ROUND(AVG(p.{column}), 4) AS avg_return_pct,
+                    ROUND(AVG(p.{column} - ?), 4) AS avg_net_return_pct,
+                    ROUND(100.0 * SUM(CASE WHEN p.{column} > 0 THEN 1 ELSE 0 END) /
+                        NULLIF(SUM(CASE WHEN p.{column} IS NOT NULL THEN 1 ELSE 0 END), 0), 4) AS win_rate_pct,
+                    ROUND(MAX(p.{column}), 4) AS best_return_pct,
+                    ROUND(MIN(p.{column}), 4) AS worst_return_pct
+                FROM quant_signal_scores q
+                LEFT JOIN paper_trade_results p
+                    ON p.signal_id = q.signal_id
+                WHERE q.scored_at >= ?
+                {code_filter}
+            """.format(column=column, code_filter=code_filter), [minutes, ROUND_TRIP_COST_PCT] + params_tail).fetchone()
+        except sqlite3.Error:
+            row = None
+        if row:
+            rows.append(dict(row))
+    return rows
+
+
+def _recent_score_compare(conn, code=None, limit=30, days=5):
+    since = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S.%f")
+    where = "WHERE q.scored_at >= ?"
+    params = [since]
+    if code:
+        where += " AND q.code = ?"
+        params.append(code)
+    params.append(int(limit))
+    try:
+        rows = conn.execute("""
+            SELECT
+                q.scored_at,
+                q.code,
+                q.action_hint,
+                q.final_quant_score,
+                q.expected_value_score,
+                q.market_risk_score,
+                g.decision AS gpt_decision,
+                g.confidence AS gpt_confidence,
+                g.risk_score AS gpt_risk_score,
+                p.return_60m_pct,
+                p.outcome_label
+            FROM quant_signal_scores q
+            LEFT JOIN paper_trade_results p
+                ON p.signal_id = q.signal_id
+            LEFT JOIN gpt_analysis_scores g
+                ON g.code = q.code
+               AND g.analyzed_at >= q.scored_at
+               AND g.analyzed_at <= datetime(q.scored_at, '+5 minutes')
+            {where}
+            ORDER BY q.scored_at DESC, q.id DESC
+            LIMIT ?
+        """.format(where=where), params).fetchall()
+    except sqlite3.Error:
+        return []
+    return [dict(row) for row in rows]
+
+
+def _recent_quant_feedback(conn, code=None, limit=30):
+    where = ""
+    params = []
+    if code:
+        where = "WHERE code = ? OR scope = 'global'"
+        params.append(code)
+    params.append(int(limit))
+    try:
+        rows = conn.execute("""
+            SELECT
+                generated_at,
+                scope,
+                code,
+                window_start,
+                window_end,
+                signal_count,
+                evaluated_count,
+                payload_json,
+                guidance_json
+            FROM quant_feedback_snapshots
+            {where}
+            ORDER BY generated_at DESC, id DESC
+            LIMIT ?
+        """.format(where=where), params).fetchall()
+    except sqlite3.Error:
+        return []
+    return [_quant_feedback_view_row(row) for row in rows]
+
+
+def _quant_feedback_view_row(row):
+    payload = _load_json(row["payload_json"])
+    guidance = _load_json(row["guidance_json"])
+    overview = payload.get("overview") or {}
+    return {
+        "generated_at": row["generated_at"],
+        "scope": row["scope"],
+        "code": row["code"],
+        "signal_count": row["signal_count"] if row["signal_count"] is not None else overview.get("signal_count"),
+        "evaluated_count": row["evaluated_count"] if row["evaluated_count"] is not None else overview.get("evaluated_count"),
+        "win_rate_60m": overview.get("win_rate_60m_pct"),
+        "avg_net_return_60m_pct": overview.get("avg_net_return_60m_pct"),
+        "profit_factor_60m": overview.get("profit_factor_60m"),
+        "quality_label": guidance.get("label"),
+        "recommended_action": guidance.get("summary"),
+    }
+
+
 def _latest_gpt_call(conn):
     return _row(conn, """
         SELECT *
@@ -1004,6 +1242,70 @@ def _paper_html(row):
         _num_class(row.get("max_loss_60m_pct")),
         _fmt(row.get("max_loss_60m_pct"), 4, signed=True),
         _e(row.get("outcome_label") or ""),
+    )
+
+
+def _score_compare_html(row):
+    return """<tr><td>{}</td><td>{}</td><td>{}</td><td class="num">{}</td><td class="num">{}</td><td class="num">{}</td><td>{}</td><td class="num">{}</td><td class="num">{}</td><td class="num {}">{}</td><td>{}</td></tr>""".format(
+        _e(row.get("scored_at")),
+        _e(row.get("code")),
+        _e(row.get("action_hint")),
+        _fmt(row.get("final_quant_score"), 1),
+        _fmt(row.get("expected_value_score"), 1),
+        _fmt(row.get("market_risk_score"), 1),
+        _e(row.get("gpt_decision") or "-"),
+        _fmt(row.get("gpt_confidence"), 1),
+        _fmt(row.get("gpt_risk_score"), 1),
+        _num_class(row.get("return_60m_pct")),
+        _fmt(row.get("return_60m_pct"), 4, signed=True),
+        _e(row.get("outcome_label") or ""),
+    )
+
+
+def _horizon_html(row):
+    return """<tr><td class="num">{}</td><td class="num">{}</td><td class="num {}">{}</td><td class="num {}">{}</td><td class="num">{}</td><td class="num {}">{}</td><td class="num {}">{}</td></tr>""".format(
+        _e(row.get("horizon_min")),
+        _e(row.get("evaluated_count")),
+        _num_class(row.get("avg_return_pct")),
+        _fmt(row.get("avg_return_pct"), 4, signed=True),
+        _num_class(row.get("avg_net_return_pct")),
+        _fmt(row.get("avg_net_return_pct"), 4, signed=True),
+        _fmt(row.get("win_rate_pct"), 2),
+        _num_class(row.get("best_return_pct")),
+        _fmt(row.get("best_return_pct"), 4, signed=True),
+        _num_class(row.get("worst_return_pct")),
+        _fmt(row.get("worst_return_pct"), 4, signed=True),
+    )
+
+
+def _target_exit_html(row):
+    return """<tr><td class="num">{}</td><td class="num">{}</td><td class="num">{}</td><td class="num">{}</td><td class="num">{}</td><td class="num">{}</td><td class="num">{}</td><td class="num">{}</td><td class="num {}">{}</td></tr>""".format(
+        _e(row.get("horizon_min")),
+        _fmt(row.get("target_pct"), 2, signed=True),
+        _fmt(row.get("stop_pct"), 2),
+        _e(row.get("evaluated_count")),
+        _fmt(row.get("target_first_rate_pct"), 2),
+        _fmt(row.get("stop_first_rate_pct"), 2),
+        _e(row.get("timeout_count")),
+        _fmt(row.get("win_rate_pct"), 2),
+        _num_class(row.get("avg_net_exit_return_pct")),
+        _fmt(row.get("avg_net_exit_return_pct"), 4, signed=True),
+    )
+
+
+def _quant_feedback_html(row):
+    return """<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td class="num">{}</td><td class="num">{}</td><td class="num">{}</td><td class="num {}">{}</td><td class="num">{}</td><td>{}</td></tr>""".format(
+        _e(row.get("generated_at")),
+        _e(row.get("scope")),
+        _e(row.get("code") or "GLOBAL"),
+        _e(row.get("quality_label")),
+        _e(row.get("signal_count")),
+        _e(row.get("evaluated_count")),
+        _fmt(row.get("win_rate_60m"), 2),
+        _num_class(row.get("avg_net_return_60m_pct")),
+        _fmt(row.get("avg_net_return_60m_pct"), 4, signed=True),
+        _fmt(row.get("profit_factor_60m"), 3),
+        _e(row.get("recommended_action") or ""),
     )
 
 

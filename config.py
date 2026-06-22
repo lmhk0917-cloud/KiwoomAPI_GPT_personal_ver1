@@ -21,6 +21,15 @@ MARKET_BENCHMARK_CODES = {
 # events are detected, not on every timer tick.
 GPT_ANALYSIS_INTERVAL_SEC = 60
 
+# Regular-session close guard. After this local time the app stops creating
+# fresh analysis/GPT rows from stale ticks and runs paper/quant feedback once.
+MARKET_REGULAR_CLOSE_TIME = "15:30"
+POST_MARKET_FEEDBACK_TIME = "15:31"
+ENABLE_POST_MARKET_FEEDBACK = True
+POST_MARKET_FEEDBACK_LOOKBACK_DAYS = 1
+POST_MARKET_FEEDBACK_MIN_SAMPLE = 3
+POST_MARKET_STOP_ANALYSIS_AFTER_FINALIZE = True
+
 # Per-symbol in-memory tick cap. SQLite persistence is separate.
 MAX_TICKS_PER_CODE_MEMORY = 50000
 

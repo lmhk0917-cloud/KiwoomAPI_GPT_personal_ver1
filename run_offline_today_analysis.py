@@ -16,6 +16,7 @@ from data_store import TickStore
 from env_loader import load_project_env
 from event_detector import detect_gpt_events
 from gpt_analyzer import GPTAnalyzer
+from gpt_result_parser import parse_gpt_analysis_scores
 from indicators import summarize_multi_timeframes_for_gpt
 from market_context import MarketContextStore
 from paper_trade_simulator import evaluate_signal, fetch_pending_signals
@@ -221,7 +222,7 @@ def run_gpt_review(store, summaries, settings, args):
     payload_stats = gpt.last_payload_stats or {}
     status = "failed" if gpt.last_error_message else "success"
 
-    store.save_gpt_call_log(
+    gpt_call_id = store.save_gpt_call_log(
         started_at=started_at.strftime("%Y-%m-%d %H:%M:%S.%f"),
         finished_at=finished_at.strftime("%Y-%m-%d %H:%M:%S.%f"),
         status=status,
@@ -239,6 +240,13 @@ def run_gpt_review(store, summaries, settings, args):
         error_message=gpt.last_error_message,
         result_preview=result[:500] if result else None,
     )
+    score_rows = parse_gpt_analysis_scores(
+        result_text=result,
+        summaries=summaries,
+        gpt_call_id=gpt_call_id,
+        analyzed_at=finished_at.strftime("%Y-%m-%d %H:%M:%S.%f"),
+    )
+    store.save_gpt_analysis_scores(score_rows)
     return result
 
 

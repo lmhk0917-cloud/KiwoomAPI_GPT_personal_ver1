@@ -18,6 +18,7 @@ from config import (
     ENABLE_MACRO_CONTEXT_CRAWL,
     ENABLE_INTRADAY_NEWS_CONTEXT,
     ENABLE_PAPER_TRADE_EVALUATION,
+    ENABLE_POST_MARKET_FEEDBACK,
     GPT_ANALYSIS_INTERVAL_SEC,
     GPT_MAX_SYMBOLS_PER_CALL,
     GPT_MIN_SIGNAL_SCORE,
@@ -27,7 +28,12 @@ from config import (
     MARKET_BENCHMARK_CODES,
     MARKET_CONTEXT_TR_MAX_REQUESTS_PER_BATCH,
     MARKET_CONTEXT_TR_REQUEST_DELAY_MS,
+    MARKET_REGULAR_CLOSE_TIME,
     PAPER_TRADE_EVALUATION_LIMIT,
+    POST_MARKET_FEEDBACK_LOOKBACK_DAYS,
+    POST_MARKET_FEEDBACK_MIN_SAMPLE,
+    POST_MARKET_FEEDBACK_TIME,
+    POST_MARKET_STOP_ANALYSIS_AFTER_FINALIZE,
     PRELOAD_TICKS_MAX_AGE_MINUTES,
     PRELOAD_TICKS_PER_CODE,
     NEWS_CONTEXT_COOLDOWN_SEC,
@@ -41,6 +47,7 @@ from config import (
 from data_store import TickStore
 from event_detector import detect_gpt_events
 from gpt_analyzer import GPTAnalyzer
+from gpt_result_parser import parse_gpt_analysis_scores
 from indicators import make_market_snapshot, summarize_multi_timeframes_for_gpt
 from kiwoom_client import KiwoomClient
 from macro_context_fetcher import fetch_macro_context, fetch_news_context
@@ -48,6 +55,7 @@ from market_context import MarketContextStore
 from notifier import Notifier
 from paper_trade_simulator import evaluate_signal as evaluate_paper_signal
 from paper_trade_simulator import fetch_pending_signals
+from quant_signal_score import build_quant_signal_score
 from settings_store import SettingsStore
 from signal_generator import generate_validation_signal
 from env_loader import load_project_env
@@ -79,6 +87,7 @@ class RealtimeStrategyApp:
         self.last_macro_context_crawled_at = None
         self.last_news_context_checked_at = {}
         self.last_market_status_snapshot_key = None
+        self.post_market_feedback_done_date = None
         self.notifier = Notifier()
         self.market_context_store = MarketContextStore()
         self._preload_recent_ticks()
@@ -119,6 +128,9 @@ class RealtimeStrategyApp:
         market_summaries = []
         self.market_context_store.reload()
         self._maybe_save_market_status_snapshot(now)
+
+        if self._handle_post_market_feedback(now):
+            return
 
         if not self.kiwoom.is_logged_in:
             print("Kiwoom login not ready. Skip analysis/TR requests this cycle.")
@@ -181,6 +193,13 @@ class RealtimeStrategyApp:
                         summary=summary,
                         detected_at=detected_at
                     )
+                    quant_score = build_quant_signal_score(
+                        signal=signal,
+                        summary=summary,
+                        signal_id=signal_id,
+                        scored_at=detected_at,
+                    )
+                    self.tick_store.save_quant_signal_score(quant_score)
                     print(
                         f"{name}({code}) signal #{signal_id}: "
                         f"{signal['action_hint']} score={signal['confidence_score']}"
@@ -238,7 +257,7 @@ class RealtimeStrategyApp:
         payload_stats = self.gpt.last_payload_stats or {}
 
         status = "failed" if self.gpt.last_error_message else "success"
-        self.tick_store.save_gpt_call_log(
+        gpt_call_id = self.tick_store.save_gpt_call_log(
             started_at=started_at.strftime("%Y-%m-%d %H:%M:%S.%f"),
             finished_at=finished_at.strftime("%Y-%m-%d %H:%M:%S.%f"),
             status=status,
@@ -256,6 +275,14 @@ class RealtimeStrategyApp:
             error_message=self.gpt.last_error_message,
             result_preview=result[:500] if result else None
         )
+        score_rows = parse_gpt_analysis_scores(
+            result_text=result,
+            summaries=market_summaries,
+            gpt_call_id=gpt_call_id,
+            analyzed_at=finished_at.strftime("%Y-%m-%d %H:%M:%S.%f"),
+        )
+        saved_scores = self.tick_store.save_gpt_analysis_scores(score_rows)
+        print("Structured GPT score rows saved:", saved_scores)
 
         for summary in market_summaries:
             self.last_gpt_called_at[summary["code"]] = now
@@ -269,13 +296,66 @@ class RealtimeStrategyApp:
         print(result)
         print("=========================================\n")
 
-    def _evaluate_pending_paper_trades(self):
+    def _handle_post_market_feedback(self, now):
+        """Run post-market paper/quant feedback once and block stale analysis."""
+        if not self._is_post_market_feedback_time(now):
+            return False
+
+        date_key = now.strftime("%Y-%m-%d")
+        if self.post_market_feedback_done_date == date_key:
+            return True
+
+        if not self._get_setting("ENABLE_POST_MARKET_FEEDBACK", ENABLE_POST_MARKET_FEEDBACK):
+            print("POST_MARKET_ANALYSIS_SKIPPED=feedback_disabled")
+            self.post_market_feedback_done_date = date_key
+            return True
+
+        print("POST_MARKET_FEEDBACK_STARTED={}".format(date_key))
+        since = "{} 00:00:00".format(date_key)
+        evaluated = self._evaluate_pending_paper_trades(
+            allow_partial=True,
+            since=since,
+            refresh_feedback=False,
+        )
+        snapshots = self._save_quant_feedback_snapshot()
+        print("POST_MARKET_PAPER_EVALUATED={}".format(evaluated))
+        print("POST_MARKET_QUANT_SNAPSHOTS={}".format(snapshots))
+        self.post_market_feedback_done_date = date_key
+
+        if self._get_setting(
+            "POST_MARKET_STOP_ANALYSIS_AFTER_FINALIZE",
+            POST_MARKET_STOP_ANALYSIS_AFTER_FINALIZE
+        ):
+            try:
+                self.timer.stop()
+                print("POST_MARKET_ANALYSIS_TIMER_STOPPED=True")
+            except Exception as exc:
+                print("POST_MARKET_ANALYSIS_TIMER_STOP_ERROR={}".format(exc))
+
+        return True
+
+    def _is_post_market_feedback_time(self, now):
+        """Return True once local time has passed the configured feedback time."""
+        time_text = self._get_setting("POST_MARKET_FEEDBACK_TIME", POST_MARKET_FEEDBACK_TIME)
+        target = self._parse_hhmm_time(time_text, default=POST_MARKET_FEEDBACK_TIME)
+        if target is None:
+            return False
+        return now.time() >= target
+
+    def _parse_hhmm_time(self, value, default=None):
+        text = str(value or default or "").strip()
+        try:
+            return datetime.strptime(text, "%H:%M").time()
+        except ValueError:
+            return None
+
+    def _evaluate_pending_paper_trades(self, allow_partial=False, since=None, refresh_feedback=True):
         """Evaluate saved validation signals when enough future ticks exist."""
         if not self.tick_store.conn:
-            return
+            return 0
 
         if not self._get_setting("ENABLE_PAPER_TRADE_EVALUATION", ENABLE_PAPER_TRADE_EVALUATION):
-            return
+            return 0
 
         limit = self._get_setting("PAPER_TRADE_EVALUATION_LIMIT", PAPER_TRADE_EVALUATION_LIMIT)
 
@@ -285,13 +365,13 @@ class RealtimeStrategyApp:
             limit = PAPER_TRADE_EVALUATION_LIMIT
 
         if limit <= 0:
-            return
+            return 0
 
-        signals = fetch_pending_signals(self.tick_store, limit=limit)
+        signals = fetch_pending_signals(self.tick_store, limit=limit, since=since)
         evaluated = 0
 
         for signal in signals:
-            result = evaluate_paper_signal(self.tick_store, signal)
+            result = evaluate_paper_signal(self.tick_store, signal, allow_partial=allow_partial)
             if not result:
                 continue
 
@@ -300,6 +380,46 @@ class RealtimeStrategyApp:
 
         if evaluated:
             print("Paper-trade evaluations saved:", evaluated)
+            if refresh_feedback:
+                self._save_quant_feedback_snapshot()
+        return evaluated
+
+    def _save_quant_feedback_snapshot(self):
+        """Refresh quant-style feedback after new paper-trade rows are saved."""
+        try:
+            from quant_feedback import save_feedback_snapshots
+
+            days = self._get_setting(
+                "POST_MARKET_FEEDBACK_LOOKBACK_DAYS",
+                POST_MARKET_FEEDBACK_LOOKBACK_DAYS
+            )
+            min_sample = self._get_setting(
+                "POST_MARKET_FEEDBACK_MIN_SAMPLE",
+                POST_MARKET_FEEDBACK_MIN_SAMPLE
+            )
+            try:
+                days = int(days)
+            except (TypeError, ValueError):
+                days = POST_MARKET_FEEDBACK_LOOKBACK_DAYS
+            try:
+                min_sample = int(min_sample)
+            except (TypeError, ValueError):
+                min_sample = POST_MARKET_FEEDBACK_MIN_SAMPLE
+
+            snapshots = save_feedback_snapshots(
+                store=self.tick_store,
+                days=days,
+                min_sample=min_sample,
+                codes=list(self.watch_codes.keys()),
+            )
+            print("Quant feedback snapshots saved:", len(snapshots))
+            return len(snapshots)
+        except Exception:
+            print("QUANT_FEEDBACK_EXCEPTION")
+            traceback.print_exc()
+            sys.stdout.flush()
+            sys.stderr.flush()
+            return 0
 
     def _can_call_gpt(self, code, now):
         """Apply per-symbol cooldown to avoid repeated GPT calls on the same move."""

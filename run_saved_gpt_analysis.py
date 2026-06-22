@@ -14,6 +14,7 @@ from app_paths import DEFAULT_DB_PATH, setup_runtime_logging
 from data_store import TickStore
 from env_loader import load_project_env
 from gpt_analyzer import GPTAnalyzer
+from gpt_result_parser import parse_gpt_analysis_scores
 from settings_store import SettingsStore
 
 
@@ -52,7 +53,7 @@ def main():
         status = "failed" if gpt.last_error_message else "success"
         payload_stats = gpt.last_payload_stats or {}
 
-        store.save_gpt_call_log(
+        gpt_call_id = store.save_gpt_call_log(
             started_at=started_at.strftime("%Y-%m-%d %H:%M:%S.%f"),
             finished_at=finished_at.strftime("%Y-%m-%d %H:%M:%S.%f"),
             status=status,
@@ -70,6 +71,13 @@ def main():
             error_message=gpt.last_error_message,
             result_preview=result[:500] if result else None
         )
+        score_rows = parse_gpt_analysis_scores(
+            result_text=result,
+            summaries=summaries,
+            gpt_call_id=gpt_call_id,
+            analyzed_at=finished_at.strftime("%Y-%m-%d %H:%M:%S.%f"),
+        )
+        saved_score_rows = store.save_gpt_analysis_scores(score_rows)
 
         if args.save_analysis_result:
             saved_at = finished_at.strftime("%Y-%m-%d %H:%M:%S.%f")
@@ -95,6 +103,7 @@ def main():
         print("completion_tokens:", gpt.last_usage.get("completion_tokens"))
         print("total_tokens:", gpt.last_usage.get("total_tokens"))
         print("saved_analysis_result:", bool(args.save_analysis_result))
+        print("saved_gpt_score_rows:", saved_score_rows)
         print()
         print(result)
     finally:

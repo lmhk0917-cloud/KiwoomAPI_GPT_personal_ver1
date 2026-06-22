@@ -82,6 +82,27 @@ TABLE_SQL = [
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS gpt_analysis_scores (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        gpt_call_id INTEGER,
+        analyzed_at TEXT NOT NULL,
+        code TEXT NOT NULL,
+        parse_status TEXT NOT NULL,
+        decision TEXT,
+        risk_score REAL,
+        gpt_context_score REAL,
+        breakout_score REAL,
+        trend_score REAL,
+        confidence REAL,
+        risk_flags_json TEXT,
+        invalid_condition TEXT,
+        summary TEXT,
+        entry_plan TEXT,
+        raw_json TEXT,
+        error_message TEXT
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS signal_logs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         detected_at TEXT NOT NULL,
@@ -96,6 +117,22 @@ TABLE_SQL = [
         target_2 REAL,
         reason_json TEXT,
         summary_json TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS quant_signal_scores (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        signal_id INTEGER,
+        scored_at TEXT NOT NULL,
+        code TEXT NOT NULL,
+        action_hint TEXT,
+        quant_signal_score REAL,
+        expected_value_score REAL,
+        market_risk_score REAL,
+        final_quant_score REAL,
+        decision_side TEXT,
+        feature_json TEXT,
+        formula_version TEXT
     )
     """,
     """
@@ -167,6 +204,21 @@ TABLE_SQL = [
     )
     """,
     """
+    CREATE TABLE IF NOT EXISTS quant_feedback_snapshots (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        generated_at TEXT NOT NULL,
+        scope TEXT NOT NULL,
+        code TEXT,
+        window_start TEXT,
+        window_end TEXT,
+        min_sample INTEGER,
+        signal_count INTEGER,
+        evaluated_count INTEGER,
+        payload_json TEXT NOT NULL,
+        guidance_json TEXT
+    )
+    """,
+    """
     CREATE TABLE IF NOT EXISTS app_settings (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL,
@@ -201,6 +253,7 @@ MIGRATION_COLUMNS = [
     ("paper_trade_results", "target_2_hit", "INTEGER"),
     ("paper_trade_results", "stop_loss_hit", "INTEGER"),
     ("paper_trade_results", "outcome_label", "TEXT"),
+    ("gpt_analysis_scores", "entry_plan", "TEXT"),
 ]
 
 INDEX_SQL = [
@@ -208,7 +261,11 @@ INDEX_SQL = [
     "CREATE INDEX IF NOT EXISTS idx_analysis_code_analyzed_at ON analysis_results (code, analyzed_at)",
     "CREATE INDEX IF NOT EXISTS idx_event_logs_code_detected_at ON event_logs (code, detected_at)",
     "CREATE INDEX IF NOT EXISTS idx_gpt_call_logs_started_at ON gpt_call_logs (started_at)",
+    "CREATE INDEX IF NOT EXISTS idx_gpt_analysis_scores_code_time ON gpt_analysis_scores (code, analyzed_at)",
+    "CREATE INDEX IF NOT EXISTS idx_gpt_analysis_scores_call_id ON gpt_analysis_scores (gpt_call_id)",
     "CREATE INDEX IF NOT EXISTS idx_signal_logs_code_detected_at ON signal_logs (code, detected_at)",
+    "CREATE INDEX IF NOT EXISTS idx_quant_signal_scores_signal_id ON quant_signal_scores (signal_id)",
+    "CREATE INDEX IF NOT EXISTS idx_quant_signal_scores_code_time ON quant_signal_scores (code, scored_at)",
     "CREATE INDEX IF NOT EXISTS idx_paper_trade_results_signal_id ON paper_trade_results (signal_id)",
     "CREATE INDEX IF NOT EXISTS idx_notification_logs_sent_at ON notification_logs (sent_at)",
     """
@@ -218,6 +275,8 @@ INDEX_SQL = [
     "CREATE INDEX IF NOT EXISTS idx_historical_bars_code_tf_time ON historical_bars (code, timeframe, bar_time)",
     "CREATE INDEX IF NOT EXISTS idx_market_context_scope_section_time ON market_context_snapshots (scope, section, collected_at)",
     "CREATE INDEX IF NOT EXISTS idx_market_context_code_section_time ON market_context_snapshots (code, section, collected_at)",
+    "CREATE INDEX IF NOT EXISTS idx_quant_feedback_scope_time ON quant_feedback_snapshots (scope, generated_at)",
+    "CREATE INDEX IF NOT EXISTS idx_quant_feedback_code_time ON quant_feedback_snapshots (code, generated_at)",
     "CREATE INDEX IF NOT EXISTS idx_app_settings_updated_at ON app_settings (updated_at)",
 ]
 

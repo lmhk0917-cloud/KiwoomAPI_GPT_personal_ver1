@@ -157,3 +157,36 @@ events가 있는 종목은 반드시 작성한다.
 
 [분석 데이터]
 {data_json}
+
+[STRICT JSON OUTPUT]
+Return exactly one valid JSON object. Do not wrap it in markdown fences.
+Do not add any text before or after the JSON.
+Use this schema:
+{
+  "market": {
+    "state": "bullish|neutral|bearish|unknown",
+    "risk_regime": "risk_on|risk_neutral|risk_off|unknown",
+    "summary": "short Korean summary"
+  },
+  "symbols": [
+    {
+      "code": "005930",
+      "decision": "buy_watch|observe|avoid|partial_profit|sell_watch",
+      "risk_score": 0,
+      "gpt_context_score": 0,
+      "breakout_score": 0,
+      "trend_score": 0,
+      "confidence": 0,
+      "risk_flags": ["short risk flag"],
+      "invalid_condition": "condition that invalidates the scenario",
+      "summary": "short Korean explanation",
+      "entry_plan": "watch/confirmation plan, not an order instruction"
+    }
+  ]
+}
+Rules:
+- Include one symbols item for every input code.
+- Scores must be numbers from 0 to 100.
+- decision must not be an order instruction; use it as a watch/risk category only.
+- If evidence is weak, set decision to "observe" or "avoid" and lower confidence.
+- Reflect quant_snapshot and paper feedback when present.

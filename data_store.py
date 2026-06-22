@@ -231,7 +231,7 @@ class TickStore:
         if not self.conn:
             return
 
-        self.conn.execute("""
+        cursor = self.conn.execute("""
             INSERT INTO gpt_call_logs (
                 started_at, finished_at, status, requested_count,
                 codes, model, duration_ms, prompt_chars, payload_original_chars,
@@ -258,6 +258,45 @@ class TickStore:
             result_preview,
         ))
         self.conn.commit()
+        return cursor.lastrowid
+
+    def save_gpt_analysis_scores(self, rows):
+        """Persist structured per-symbol GPT scores."""
+        if not self.conn or not rows:
+            return 0
+
+        values = []
+        for row in rows:
+            values.append((
+                row.get("gpt_call_id"),
+                row.get("analyzed_at") or datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f"),
+                row.get("code"),
+                row.get("parse_status") or "unknown",
+                row.get("decision"),
+                row.get("risk_score"),
+                row.get("gpt_context_score"),
+                row.get("breakout_score"),
+                row.get("trend_score"),
+                row.get("confidence"),
+                json.dumps(row.get("risk_flags") or [], ensure_ascii=False),
+                row.get("invalid_condition"),
+                row.get("summary"),
+                row.get("entry_plan"),
+                json.dumps(row.get("raw_json"), ensure_ascii=False) if row.get("raw_json") is not None else None,
+                row.get("error_message"),
+            ))
+
+        self.conn.executemany("""
+            INSERT INTO gpt_analysis_scores (
+                gpt_call_id, analyzed_at, code, parse_status, decision,
+                risk_score, gpt_context_score, breakout_score, trend_score,
+                confidence, risk_flags_json, invalid_condition, summary,
+                entry_plan, raw_json, error_message
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, values)
+        self.conn.commit()
+        return len(values)
 
     def save_signal_log(self, signal, summary, detected_at=None):
         """Persist a pre-GPT validation signal and return its row id."""
@@ -286,6 +325,34 @@ class TickStore:
             signal.get("target_2"),
             json.dumps(signal.get("reasons", []), ensure_ascii=False),
             json.dumps(summary, ensure_ascii=False),
+        ))
+        self.conn.commit()
+        return cursor.lastrowid
+
+    def save_quant_signal_score(self, score):
+        """Persist deterministic quant score for a saved signal."""
+        if not self.conn or not score:
+            return None
+
+        cursor = self.conn.execute("""
+            INSERT INTO quant_signal_scores (
+                signal_id, scored_at, code, action_hint, quant_signal_score,
+                expected_value_score, market_risk_score, final_quant_score,
+                decision_side, feature_json, formula_version
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            score.get("signal_id"),
+            score.get("scored_at") or datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f"),
+            score.get("code"),
+            score.get("action_hint"),
+            score.get("quant_signal_score"),
+            score.get("expected_value_score"),
+            score.get("market_risk_score"),
+            score.get("final_quant_score"),
+            score.get("decision_side"),
+            json.dumps(score.get("feature_json") or {}, ensure_ascii=False),
+            score.get("formula_version"),
         ))
         self.conn.commit()
         return cursor.lastrowid
@@ -325,6 +392,66 @@ class TickStore:
             json.dumps(result, ensure_ascii=False),
         ))
         self.conn.commit()
+
+    def save_quant_feedback_snapshot(self, snapshot):
+        """Persist one quant feedback snapshot for GPT context and audits."""
+        if not self.conn or not snapshot:
+            return None
+
+        overview = snapshot.get("overview") or {}
+        guidance = snapshot.get("guidance") or {}
+        cursor = self.conn.execute("""
+            INSERT INTO quant_feedback_snapshots (
+                generated_at, scope, code, window_start, window_end,
+                min_sample, signal_count, evaluated_count,
+                payload_json, guidance_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            snapshot.get("generated_at") or datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f"),
+            snapshot.get("scope") or ("code" if snapshot.get("code") else "global"),
+            snapshot.get("code"),
+            snapshot.get("window_start"),
+            snapshot.get("window_end"),
+            snapshot.get("min_sample"),
+            overview.get("signal_count"),
+            overview.get("evaluated_count"),
+            json.dumps(snapshot, ensure_ascii=False),
+            json.dumps(guidance, ensure_ascii=False),
+        ))
+        self.conn.commit()
+        return cursor.lastrowid
+
+    def get_latest_quant_feedback_snapshot(self, code=None):
+        """Return the latest persisted quant feedback snapshot."""
+        if not self.conn:
+            return None
+
+        if code:
+            row = self.conn.execute("""
+                SELECT payload_json
+                FROM quant_feedback_snapshots
+                WHERE scope = 'code'
+                  AND code = ?
+                ORDER BY generated_at DESC, id DESC
+                LIMIT 1
+            """, (code,)).fetchone()
+        else:
+            row = self.conn.execute("""
+                SELECT payload_json
+                FROM quant_feedback_snapshots
+                WHERE scope = 'global'
+                ORDER BY generated_at DESC, id DESC
+                LIMIT 1
+            """).fetchone()
+
+        if not row or not row["payload_json"]:
+            return None
+
+        try:
+            return json.loads(row["payload_json"])
+        except (TypeError, ValueError):
+            return None
 
     @staticmethod
     def _bool_to_int(value):
@@ -690,6 +817,24 @@ class TickStore:
             win_rate_60m_pct=self._win_rate(return_60m_values),
             stop_loss_hit_rate_pct=self._hit_rate(evaluated_rows, "stop_loss_hit"),
         )
+        quant_feedback = self.get_latest_quant_feedback_snapshot(code=code)
+        if quant_feedback:
+            learning_feedback["quant_snapshot"] = {
+                "generated_at": quant_feedback.get("generated_at"),
+                "window_start": quant_feedback.get("window_start"),
+                "overview": {
+                    key: (quant_feedback.get("overview") or {}).get(key)
+                    for key in (
+                        "signal_count",
+                        "evaluated_count",
+                        "avg_net_return_60m_pct",
+                        "profit_factor_60m",
+                        "expectancy_60m_pct",
+                        "stop_loss_hit_rate_pct",
+                    )
+                },
+                "guidance": quant_feedback.get("guidance"),
+            }
 
         return {
             "asof": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f"),

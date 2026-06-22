@@ -1,5 +1,5 @@
 param(
-  [string]$ProjectDir = "C:\Users\lmhk2\PycharmProjects\KiwoomAPI_GPT_personal_ver1"
+  [string]$ProjectDir = "C:\Users\lmhk2\PycharmProjects\Kiwoom_Core_Quant_Lab"
 )
 
 $ErrorActionPreference = "Stop"
@@ -40,7 +40,7 @@ try {
   Write-Host "ADMIN_INSTALL_LOG=$logPath"
 
   .\register_openapi_bootstrap_task.ps1
-  .\register_market_day_task.ps1 -OpenApiTaskName KiwoomOpenAPIBootstrap
+  .\register_market_day_task.ps1 -OpenApiTaskName KiwoomCoreQuantOpenAPIBootstrap
   .\check_openapi_bootstrap_task.ps1
 
   Write-Host ""
