@@ -74,6 +74,10 @@ class Dashboard(QWidget):
         self.tables = {}
         self.gpt_row_ids = []
         self.context_row_ids = []
+        self.refresh_running = False
+        self.refresh_queue = []
+        self.refresh_started_at = None
+        self.raw_table_limit = 50
 
         self.setWindowTitle("키움 OpenAI 개인 분석 대시보드")
         self.resize(1500, 900)
@@ -375,23 +379,60 @@ class Dashboard(QWidget):
 
     def _auto_refresh(self):
         if self.auto_refresh_checkbox.isChecked():
-            self.refresh_overview()
-            self.refresh_chart()
-            self.refresh_operations()
-            self.refresh_gpt_results()
-            self.refresh_context_snapshots()
-            self.refresh_raw_tables()
+            self.refresh_live_sections()
 
     def refresh_all(self):
-        """Refresh all dashboard sections."""
-        self.refresh_overview()
-        self.refresh_chart()
-        self.refresh_operations()
-        self.refresh_gpt_results()
-        self.refresh_context_snapshots()
-        self.refresh_raw_tables()
-        self.refresh_settings()
-        self.refresh_watchlist()
+        """Refresh all dashboard sections without locking the UI in one long call."""
+        self._start_refresh_queue([
+            self.refresh_overview,
+            self.refresh_chart,
+            self.refresh_operations,
+            self.refresh_gpt_results,
+            self.refresh_context_snapshots,
+            self.refresh_raw_tables,
+            self.refresh_settings,
+            self.refresh_watchlist,
+        ], label="full")
+
+    def refresh_live_sections(self):
+        """Refresh operational sections on the timer; skip heavy maintenance tabs."""
+        self._start_refresh_queue([
+            self.refresh_overview,
+            self.refresh_chart,
+            self.refresh_operations,
+            self.refresh_gpt_results,
+            self.refresh_context_snapshots,
+        ], label="live")
+
+    def _start_refresh_queue(self, callbacks, label):
+        if self.refresh_running:
+            self.status_label.setText("Refresh already running")
+            return
+        self.refresh_running = True
+        self.refresh_started_at = datetime.now()
+        self.refresh_queue = list(callbacks)
+        self.refresh_button.setEnabled(False)
+        self.status_label.setText("Refreshing {} sections...".format(label))
+        QTimer.singleShot(0, self._run_next_refresh_step)
+
+    def _run_next_refresh_step(self):
+        if not self.refresh_queue:
+            elapsed_ms = int((datetime.now() - self.refresh_started_at).total_seconds() * 1000) if self.refresh_started_at else 0
+            self.refresh_running = False
+            self.refresh_button.setEnabled(True)
+            self.status_label.setText("Last refresh: {} ({} ms)".format(self._now_text(), elapsed_ms))
+            return
+
+        callback = self.refresh_queue.pop(0)
+        try:
+            callback()
+        except Exception as exc:
+            self.status_label.setText("Refresh failed in {}: {}".format(getattr(callback, "__name__", "step"), exc))
+            self.refresh_queue = []
+            self.refresh_running = False
+            self.refresh_button.setEnabled(True)
+            return
+        QTimer.singleShot(1, self._run_next_refresh_step)
 
     def refresh_overview(self):
         """Refresh dashboard metrics, latest status, events, and signals."""
@@ -889,8 +930,8 @@ class Dashboard(QWidget):
                         SELECT *
                         FROM {}
                         ORDER BY {} DESC
-                        LIMIT 100
-                    """.format(table_name, order_col)).fetchall()
+                        LIMIT ?
+                    """.format(table_name, order_col), (self.raw_table_limit,)).fetchall()
                 except sqlite3.Error:
                     rows = []
                 self.fill_table(self.tables[label], rows)
@@ -899,28 +940,32 @@ class Dashboard(QWidget):
 
     def fill_table(self, table, rows):
         """Render SQLite rows into a QTableWidget."""
-        if not rows:
-            table.setRowCount(0)
-            table.setColumnCount(0)
-            return
+        table.setUpdatesEnabled(False)
+        try:
+            if not rows:
+                table.setRowCount(0)
+                table.setColumnCount(0)
+                return
 
-        columns = list(rows[0].keys())
-        table.setColumnCount(len(columns))
-        table.setHorizontalHeaderLabels([self._display_column_label(column) for column in columns])
-        table.setRowCount(len(rows))
+            columns = list(rows[0].keys())
+            table.setColumnCount(len(columns))
+            table.setHorizontalHeaderLabels([self._display_column_label(column) for column in columns])
+            table.setRowCount(len(rows))
 
-        for row_idx, row in enumerate(rows):
-            for col_idx, column in enumerate(columns):
-                value = row[column]
-                text = "" if value is None else str(value)
-                text = self._display_cell_text(column, text)
-                if len(text) > 300:
-                    text = text[:300] + "..."
-                item = QTableWidgetItem(text)
-                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
-                table.setItem(row_idx, col_idx, item)
+            for row_idx, row in enumerate(rows):
+                for col_idx, column in enumerate(columns):
+                    value = row[column]
+                    text = "" if value is None else str(value)
+                    text = self._display_cell_text(column, text)
+                    if len(text) > 240:
+                        text = text[:240] + "..."
+                    item = QTableWidgetItem(text)
+                    item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                    table.setItem(row_idx, col_idx, item)
 
-        table.resizeColumnsToContents()
+            table.resizeColumnsToContents()
+        finally:
+            table.setUpdatesEnabled(True)
 
     def _fill_key_value_table(self, table, rows):
         table.setColumnCount(2)

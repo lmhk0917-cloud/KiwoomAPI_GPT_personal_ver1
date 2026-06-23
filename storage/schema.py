@@ -260,13 +260,17 @@ INDEX_SQL = [
     "CREATE INDEX IF NOT EXISTS idx_ticks_code_received_at ON ticks (code, received_at)",
     "CREATE INDEX IF NOT EXISTS idx_analysis_code_analyzed_at ON analysis_results (code, analyzed_at)",
     "CREATE INDEX IF NOT EXISTS idx_event_logs_code_detected_at ON event_logs (code, detected_at)",
+    "CREATE INDEX IF NOT EXISTS idx_event_logs_type_detected_at ON event_logs (event_type, detected_at)",
     "CREATE INDEX IF NOT EXISTS idx_gpt_call_logs_started_at ON gpt_call_logs (started_at)",
     "CREATE INDEX IF NOT EXISTS idx_gpt_analysis_scores_code_time ON gpt_analysis_scores (code, analyzed_at)",
     "CREATE INDEX IF NOT EXISTS idx_gpt_analysis_scores_call_id ON gpt_analysis_scores (gpt_call_id)",
     "CREATE INDEX IF NOT EXISTS idx_signal_logs_code_detected_at ON signal_logs (code, detected_at)",
+    "CREATE INDEX IF NOT EXISTS idx_signal_logs_action_detected_at ON signal_logs (action_hint, detected_at)",
     "CREATE INDEX IF NOT EXISTS idx_quant_signal_scores_signal_id ON quant_signal_scores (signal_id)",
     "CREATE INDEX IF NOT EXISTS idx_quant_signal_scores_code_time ON quant_signal_scores (code, scored_at)",
+    "CREATE INDEX IF NOT EXISTS idx_quant_signal_scores_decision_time ON quant_signal_scores (decision_side, scored_at)",
     "CREATE INDEX IF NOT EXISTS idx_paper_trade_results_signal_id ON paper_trade_results (signal_id)",
+    "CREATE INDEX IF NOT EXISTS idx_paper_trade_results_code_evaluated_at ON paper_trade_results (code, evaluated_at)",
     "CREATE INDEX IF NOT EXISTS idx_notification_logs_sent_at ON notification_logs (sent_at)",
     """
     CREATE UNIQUE INDEX IF NOT EXISTS idx_historical_bars_unique

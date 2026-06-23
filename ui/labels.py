@@ -147,6 +147,7 @@ VALUE_LABELS_BY_COLUMN = {
         "MA5_MA20_DEAD_CROSS": "5/20 데드크로스",
         "MA5_MA20_GOLDEN_CROSS": "5/20 골든크로스",
         "MARKET_CIRCUIT_BREAKER_ACTIVE": "서킷브레이커",
+        "MARKET_CRASH_RISK": "시장 급락",
         "MARKET_SIDECAR_ACTIVE": "사이드카",
         "MARKET_VI_ACTIVE": "VI 상태",
         "MARKET_FOREIGN_SELL_PRESSURE": "시장 외국인 매도 압력",

@@ -36,6 +36,7 @@ EVENT_LABELS = {
     "ORDERBOOK_ASK_IMBALANCE": "매도호가 우위",
     "MARKET_SIDECAR_ACTIVE": "시장 사이드카 발동",
     "MARKET_CIRCUIT_BREAKER_ACTIVE": "시장 서킷브레이커 발동",
+    "MARKET_CRASH_RISK": "시장 급락 위험",
     "MARKET_VI_ACTIVE": "시장 VI 발동",
     "MARKET_FOREIGN_SELL_PRESSURE": "시장 외국인 매도 압력",
 }

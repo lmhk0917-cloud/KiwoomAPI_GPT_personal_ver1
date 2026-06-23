@@ -58,6 +58,66 @@ class QuantSignalScoreTests(unittest.TestCase):
         self.assertEqual("long_candidate", score["decision_side"])
         self.assertLess(score["expected_value_score"], 50)
         self.assertGreater(score["market_risk_score"], 70)
+        self.assertEqual("quant_signal_score_v2", score["formula_version"])
+        self.assertIn("sub_scores", score["feature_json"])
+        self.assertIn("trend_score", score["feature_json"]["sub_scores"])
+
+    def test_market_crash_caps_quant_score_and_marks_override(self):
+        score = build_quant_signal_score(
+            signal={
+                "action_hint": "WATCH_REBOUND",
+                "confidence_score": 80,
+                "risk_level": "medium",
+                "current_price": 100,
+                "stop_loss": 99,
+                "target_1": 102,
+                "target_2": 103,
+            },
+            summary={
+                "code": "005930",
+                "events": [
+                    {"type": "MARKET_CIRCUIT_BREAKER_ACTIVE"},
+                    {"type": "MARKET_CRASH_RISK"},
+                ],
+                "timeframes": {
+                    "1m": {
+                        "latest": {"return_1bar_pct": 1.0},
+                        "moving_average": {
+                            "price_above_ma5": True,
+                            "price_above_ma20": True,
+                        },
+                        "vwap": {"price_above_vwap": True},
+                    }
+                },
+            },
+            signal_id=11,
+            scored_at="2026-06-23 10:00:00.000000",
+        )
+
+        self.assertEqual("AVOID_MARKET_RISK", score["action_hint"])
+        self.assertEqual("caution_or_avoid", score["decision_side"])
+        self.assertLessEqual(score["final_quant_score"], 25)
+        self.assertIn("MARKET_CRASH_RISK", score["feature_json"]["hard_overrides"])
+        self.assertEqual("Avoid Market Risk", score["feature_json"]["score_label"])
+
+    def test_missing_gpt_uses_neutral_agreement_score(self):
+        score = build_quant_signal_score(
+            signal={
+                "action_hint": "OBSERVE_EVENT",
+                "confidence_score": 45,
+                "risk_level": "medium",
+                "current_price": 100,
+            },
+            summary={"code": "005930", "events": [], "timeframes": {}},
+            signal_id=12,
+            scored_at="2026-06-23 10:00:00.000000",
+        )
+
+        self.assertEqual(50, score["feature_json"]["sub_scores"]["gpt_agreement_score"])
+        self.assertIn(
+            "GPT score is not available; neutral agreement score used.",
+            score["feature_json"]["score_reasons"],
+        )
 
     def test_store_and_report_quant_signal_scores(self):
         signal_id = self.store.save_signal_log(

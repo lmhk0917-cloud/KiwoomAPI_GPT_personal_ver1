@@ -71,7 +71,12 @@ def _summary(events, timeframes=None, market_context=None, detected_at="2026-06-
     }
 
 
-def _event_summary(return_1bar_pct=0.1, volume_ratio_5=1.0, volume_ratio_20=1.0):
+def _event_summary(
+    return_1bar_pct=0.1,
+    volume_ratio_5=1.0,
+    volume_ratio_20=1.0,
+    market_context=None,
+):
     return {
         "code": "005930",
         "name": "Samsung Electronics",
@@ -98,7 +103,7 @@ def _event_summary(return_1bar_pct=0.1, volume_ratio_5=1.0, volume_ratio_20=1.0)
                 "trend": {},
             }
         },
-        "market_context": {},
+        "market_context": market_context or {},
     }
 
 
@@ -154,6 +159,14 @@ class SignalLogicTest(unittest.TestCase):
                     }
                 },
             )
+        )
+
+        self.assertEqual("AVOID_MARKET_RISK", signal["action_hint"])
+        self.assertEqual("high", signal["risk_level"])
+
+    def test_market_crash_risk_blocks_watch_signal(self):
+        signal = generate_validation_signal(
+            _summary(["NEAR_BOX_LOW", "ORDERBOOK_BID_IMBALANCE", "MARKET_CRASH_RISK"])
         )
 
         self.assertEqual("AVOID_MARKET_RISK", signal["action_hint"])
@@ -316,6 +329,23 @@ class EventDetectorTest(unittest.TestCase):
         events = detect_gpt_events(_event_summary(return_1bar_pct=1.0, volume_ratio_5=1.0))
 
         self.assertNotIn("FORCE_GPT_INTRADAY_EVENT", [event["type"] for event in events])
+
+    def test_market_index_drop_infers_circuit_breaker_level_risk(self):
+        events = detect_gpt_events(
+            _event_summary(
+                market_context={
+                    "market_indices": {
+                        "kospi_change_pct": -8.18,
+                        "kosdaq_change_pct": -6.68,
+                        "kospi200_change_pct": -8.54,
+                    }
+                }
+            )
+        )
+        event_types = [event["type"] for event in events]
+
+        self.assertIn("MARKET_CIRCUIT_BREAKER_ACTIVE", event_types)
+        self.assertIn("MARKET_CRASH_RISK", event_types)
 
 
 class NewsContextFetcherTest(unittest.TestCase):

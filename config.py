@@ -67,6 +67,7 @@ GPT_STRONG_EVENT_TYPES = [
     "MARKET_SIDECAR_ACTIVE",
     "MARKET_SIDECAR_RECENT",
     "MARKET_CIRCUIT_BREAKER_ACTIVE",
+    "MARKET_CRASH_RISK",
     "MARKET_VI_ACTIVE",
     "MARKET_FOREIGN_SELL_PRESSURE",
 ]
@@ -81,8 +82,15 @@ GPT_FORCE_EVENT_TYPES = [
     "FORCE_GPT_INTRADAY_EVENT",
     "MARKET_SIDECAR_ACTIVE",
     "MARKET_CIRCUIT_BREAKER_ACTIVE",
+    "MARKET_CRASH_RISK",
     "MARKET_VI_ACTIVE",
 ]
+
+# Market-wide crash inference. Explicit KRX/manual status remains preferred,
+# but Kiwoom index snapshots can still identify circuit-breaker-level sessions.
+EVENT_MARKET_CRASH_WARNING_PCT = -5.0
+EVENT_MARKET_CIRCUIT_BREAKER_INFER_PCT = -8.0
+EVENT_MARKET_CRASH_MIN_INDEX_COUNT = 1
 
 # Trading cost assumptions used only for analysis and paper validation.
 # Values are percentages. Keep them editable because broker fees and taxes vary.
@@ -170,6 +178,7 @@ TELEGRAM_ALLOWED_ACTION_HINTS = [
 TELEGRAM_ALWAYS_NOTIFY_EVENT_TYPES = [
     "MARKET_SIDECAR_ACTIVE",
     "MARKET_CIRCUIT_BREAKER_ACTIVE",
+    "MARKET_CRASH_RISK",
     "MARKET_VI_ACTIVE",
 ]
 
@@ -215,6 +224,7 @@ NEWS_CONTEXT_TRIGGER_EVENT_TYPES = [
     "MARKET_SIDECAR_ACTIVE",
     "MARKET_SIDECAR_RECENT",
     "MARKET_CIRCUIT_BREAKER_ACTIVE",
+    "MARKET_CRASH_RISK",
     "MARKET_VI_ACTIVE",
     "MARKET_FOREIGN_SELL_PRESSURE",
 ]

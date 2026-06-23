@@ -20,6 +20,12 @@ from env_loader import load_project_env
 from paper_trade_report import build_report
 
 
+SYSTEM_PROMPT = (
+    "너는 장마감 후 paper-trade 결과와 시장 컨텍스트를 검토하는 분석 보조 AI다. "
+    "실시간 매수 지시를 하지 말고, 다음 테스트를 위한 위험/수익 피드백만 작성한다."
+)
+
+
 def main():
     args = parse_args()
     setup_runtime_logging("post_market_feedback_gpt")
@@ -41,13 +47,7 @@ def main():
     response = client.chat.completions.create(
         model=GPT_MODEL,
         messages=[
-            {
-                "role": "system",
-                "content": (
-                    "너는 장마감 후 매매 신호 품질을 검토하는 분석 보조 AI다. "
-                    "실시간 매수 지시가 아니라 다음 테스트를 위한 피드백만 작성한다."
-                ),
-            },
+            {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": prompt},
         ],
         max_tokens=GPT_MAX_TOKENS,
@@ -143,22 +143,22 @@ def build_prompt(payload):
     data_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
 
     return """
-너는 장마감 후 주식 분석 시스템의 신호 품질을 검토하는 AI다.
-아래 데이터는 장중 validation_signal의 사후 성과와, 장마감 후 반영할 수 있는 뉴스/공시/대중반응 컨텍스트다.
+너는 장마감 후 주식 분석 시스템의 validation signal을 검토하는 AI다.
+아래 데이터는 저장된 paper-trade 결과, quant score, GPT 판단, 시장 컨텍스트다.
 
 목표:
-- 오늘 신호가 왜 맞았는지/틀렸는지 사후 피드백한다.
-- 뉴스/공시/대중반응은 장중 실시간 공식에 크게 반영하지 않는다.
-- 뉴스/공시/대중반응은 장마감 후 원인 분석과 다음날 리스크 메모를 만드는 데 사용한다.
-- 다음 장중 테스트에 적용할 후보 공식과 가중치를 명확한 수식으로 제안한다.
+- 오늘 신호가 사후 수익률 기준으로 맞았는지 평가한다.
+- GPT 판단과 정량식이 어디에서 일치/불일치했는지 설명한다.
+- 다음 테스트에 반영할 수 있는 수식 개선과 검증 계획을 제안한다.
+- 자동매매 지시, 매수/매도 명령, 포지션 크기 제안은 하지 않는다.
 
 규칙:
-- 자동매매 지시가 아니라 다음 테스트용 피드백이다.
-- 실시간 공식의 TextRiskScore 가중치는 1% 이하로 유지한다.
-- 뉴스/커뮤니티 반응만으로 매수 관심도를 올리지 않는다.
-- 공식은 MACD Line처럼 변수 정의가 분명해야 한다.
-- 각 변수는 0~1 또는 0~100 스케일을 명시한다.
-- 성과 표본이 작으면 강한 결론을 내리지 않는다.
+- GPT는 위험/수익 평가자이며 매수 지시자가 아니다.
+- 뉴스/커뮤니티/텍스트 컨텍스트만으로 매수 관점을 높이지 않는다.
+- TextRiskScore 또는 GPTAgreementScore의 실시간 비중은 낮게 유지한다.
+- 표본이 부족하면 강한 결론을 내리지 않는다.
+- 각 변수는 0~1 또는 0~100 스케일을 명확히 표시한다.
+- 서킷브레이커, 시장 급락, VI, 사이드카는 hard risk override로 우선 처리한다.
 
 데이터:
 {data}
@@ -166,35 +166,40 @@ def build_prompt(payload):
 출력 형식:
 
 # 장마감 피드백
-
 ## 1. 오늘 신호 성과 요약
 - 전체 성과:
 - 종목별 성과:
-- 좋았던 신호:
+- 잘 맞은 신호:
 - 나빴던 신호:
 
-## 2. 뉴스/공시/대중반응 사후 해석
-- 가격/거래량 설명에 도움이 된 뉴스:
-- 과대해석하면 안 되는 뉴스:
-- 공시/실적/가이던스 영향:
-- 커뮤니티/댓글 반응의 한계:
+## 2. GPT와 정량식 비교
+- 일치한 판단:
+- 불일치한 판단:
+- GPT가 과대평가한 요소:
+- 정량식이 놓친 요소:
+
+## 3. 시장 컨텍스트 사후 해석
+- 가격/거래량으로 설명 가능한 부분:
+- 뉴스/공시/매크로로 보완되는 부분:
+- 서킷브레이커/급락/VI/사이드카 반영 여부:
 - 다음날 리스크 메모:
 
-## 3. 다음 테스트용 공식 제안
-- 변수 정의:
-- BreakoutScore 공식:
-- TrendScore 공식:
-- VolumeTradeScore 공식:
-- FlowDerivScore 공식:
-- TextRiskScore 공식, 가중치 1% 이하:
-- RiskPenalty 공식:
-- CostPenalty 공식:
-- CombinedScore 공식:
+## 4. 다음 테스트용 수식 제안
+- TrendScore:
+- BreakoutScore:
+- VolumeFlowScore:
+- ExpectedValueScore:
+- MarketRegimeScore:
+- RiskRewardScore:
+- GPTAgreementScore:
+- RiskPenalty:
+- CostPenalty:
+- CombinedScore:
 
-## 4. 검증 계획
+## 5. 검증 계획
 - 내일 유지할 규칙:
-- 낮출 규칙:
-- 올릴 규칙:
+- 줄일 규칙:
+- 버릴 규칙:
 - 추가로 필요한 데이터:
 """.format(data=data_json)
 

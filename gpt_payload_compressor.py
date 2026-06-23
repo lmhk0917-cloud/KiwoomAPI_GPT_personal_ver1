@@ -245,34 +245,7 @@ def _compress_market_context(context, settings=None, include_global_context=True
             "source",
             "reliability",
             ]),
-            "macro_context": _compact_dict(context.get("macro_context"), [
-            "asof",
-            "source",
-            "reliability",
-            "summary",
-            "risk_regime",
-            "risk_regime_reason",
-            "kr_base_rate",
-            "kr_base_rate_change_bp",
-            "us_fed_funds_rate",
-            "us_10y_yield",
-            "us_10y_yield_change_bp",
-            "usd_krw",
-            "usd_krw_change_pct",
-            "dxy",
-            "dxy_change_pct",
-            "vix",
-            "vix_change_pct",
-            "sp500_futures_change_pct",
-            "nasdaq_futures_change_pct",
-            "nikkei_change_pct",
-            "hangseng_change_pct",
-            "wti_change_pct",
-            "gold_change_pct",
-            "semiconductor_index_change_pct",
-            "next_macro_events",
-            "notes",
-            ]),
+            "macro_context": _compress_macro_context(context.get("macro_context"), max_items),
             "market_indices": _compact_dict(context.get("market_indices"), [
             "kospi",
             "kospi_change_pct",
@@ -299,7 +272,7 @@ def _compress_market_context(context, settings=None, include_global_context=True
             "asof",
             "source",
             ]),
-            "benchmark_etfs": context.get("benchmark_etfs") or {},
+            "benchmark_etfs": _compress_benchmark_etfs(context.get("benchmark_etfs"), max_items),
             "derivatives": _compact_dict(context.get("derivatives"), [
             "kospi200_futures_price",
             "kospi200_futures_change_pct",
@@ -334,23 +307,7 @@ def _compress_market_context(context, settings=None, include_global_context=True
             "source",
             "asof",
             ]),
-            "data_quality": _compact_dict(context.get("data_quality"), [
-            "tick_last_received_at",
-            "orderbook_last_received_at",
-            "program_trading_last_received_at",
-            "market_program_trading_last_received_at",
-            "short_selling_last_received_at",
-            "credit_last_received_at",
-            "investor_flow_last_received_at",
-            "market_indices_last_received_at",
-            "market_investor_flow_last_received_at",
-            "derivatives_last_received_at",
-            "macro_context_last_checked_at",
-            "news_last_checked_at",
-            "disclosure_last_checked_at",
-            "public_reaction_last_checked_at",
-            "missing_sections",
-            ]),
+            "data_quality": _compress_data_quality(context.get("data_quality"), max_items),
         })
 
     return _drop_empty(result)
@@ -466,6 +423,81 @@ def _compress_sector_context(section, max_items):
         "sector_change_pct": (section or {}).get("sector_change_pct"),
         "relative_strength_vs_sector_pct": (section or {}).get("relative_strength_vs_sector_pct"),
         "peer_movers": _head((section or {}).get("peer_movers"), max_items),
+    })
+
+
+def _compress_macro_context(section, max_items):
+    section = section or {}
+    return _drop_empty({
+        "asof": section.get("asof"),
+        "source": section.get("source"),
+        "reliability": section.get("reliability"),
+        "summary": _truncate_text(section.get("summary")),
+        "risk_regime": section.get("risk_regime"),
+        "risk_regime_reason": _truncate_text(section.get("risk_regime_reason")),
+        "kr_base_rate": section.get("kr_base_rate"),
+        "kr_base_rate_change_bp": section.get("kr_base_rate_change_bp"),
+        "us_fed_funds_rate": section.get("us_fed_funds_rate"),
+        "us_10y_yield": section.get("us_10y_yield"),
+        "us_10y_yield_change_bp": section.get("us_10y_yield_change_bp"),
+        "usd_krw": section.get("usd_krw"),
+        "usd_krw_change_pct": section.get("usd_krw_change_pct"),
+        "dxy": section.get("dxy"),
+        "dxy_change_pct": section.get("dxy_change_pct"),
+        "vix": section.get("vix"),
+        "vix_change_pct": section.get("vix_change_pct"),
+        "sp500_futures_change_pct": section.get("sp500_futures_change_pct"),
+        "nasdaq_futures_change_pct": section.get("nasdaq_futures_change_pct"),
+        "nikkei_change_pct": section.get("nikkei_change_pct"),
+        "hangseng_change_pct": section.get("hangseng_change_pct"),
+        "wti_change_pct": section.get("wti_change_pct"),
+        "gold_change_pct": section.get("gold_change_pct"),
+        "semiconductor_index_change_pct": section.get("semiconductor_index_change_pct"),
+        "next_macro_events": _head(section.get("next_macro_events"), max_items),
+        "notes": _head(section.get("notes"), max_items),
+    })
+
+
+def _compress_benchmark_etfs(section, max_items):
+    result = {}
+    if not isinstance(section, dict):
+        return result
+
+    for code, payload in list(section.items())[:max(int(max_items), 0)]:
+        payload = payload or {}
+        snapshot = payload.get("snapshot") or payload
+        result[code] = _drop_empty({
+            "name": payload.get("name") or snapshot.get("name"),
+            "snapshot": _compact_dict(snapshot, [
+                "current_price",
+                "change_rate",
+                "acc_volume",
+                "strength",
+                "received_at",
+                "asof",
+            ]),
+        })
+    return _drop_empty(result)
+
+
+def _compress_data_quality(section, max_items):
+    section = section or {}
+    return _drop_empty({
+        "tick_last_received_at": section.get("tick_last_received_at"),
+        "orderbook_last_received_at": section.get("orderbook_last_received_at"),
+        "program_trading_last_received_at": section.get("program_trading_last_received_at"),
+        "market_program_trading_last_received_at": section.get("market_program_trading_last_received_at"),
+        "short_selling_last_received_at": section.get("short_selling_last_received_at"),
+        "credit_last_received_at": section.get("credit_last_received_at"),
+        "investor_flow_last_received_at": section.get("investor_flow_last_received_at"),
+        "market_indices_last_received_at": section.get("market_indices_last_received_at"),
+        "market_investor_flow_last_received_at": section.get("market_investor_flow_last_received_at"),
+        "derivatives_last_received_at": section.get("derivatives_last_received_at"),
+        "macro_context_last_checked_at": section.get("macro_context_last_checked_at"),
+        "news_last_checked_at": section.get("news_last_checked_at"),
+        "disclosure_last_checked_at": section.get("disclosure_last_checked_at"),
+        "public_reaction_last_checked_at": section.get("public_reaction_last_checked_at"),
+        "missing_sections": _head(section.get("missing_sections"), max_items),
     })
 
 

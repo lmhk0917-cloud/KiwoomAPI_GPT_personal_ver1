@@ -185,11 +185,15 @@ def generate_validation_signal(summary, settings=None):
             confidence_score -= 7
             reasons.append("Recent sell-side sidecar weakens early rebound and breakout reliability.")
 
-    if "MARKET_CIRCUIT_BREAKER_ACTIVE" in event_types or "MARKET_VI_ACTIVE" in event_types:
+    if (
+        "MARKET_CIRCUIT_BREAKER_ACTIVE" in event_types
+        or "MARKET_CRASH_RISK" in event_types
+        or "MARKET_VI_ACTIVE" in event_types
+    ):
         action_hint = "AVOID_MARKET_RISK"
         confidence_score += 20
         risk_level = "high"
-        reasons.append("Market-wide interruption state makes normal signal reliability lower.")
+        reasons.append("Market-wide crash/interruption state makes normal signal reliability lower.")
 
     if "MARKET_FOREIGN_SELL_PRESSURE" in event_types:
         penalty = _setting(
@@ -362,6 +366,7 @@ def _apply_risk_on_pullback_relabel(
     hard_risk_events = {
         "MARKET_SIDECAR_ACTIVE",
         "MARKET_CIRCUIT_BREAKER_ACTIVE",
+        "MARKET_CRASH_RISK",
         "MARKET_VI_ACTIVE",
         "MARKET_FOREIGN_SELL_PRESSURE",
         "NEAR_BOX_HIGH",
@@ -431,6 +436,7 @@ def _has_hard_resistance_momentum_risk(event_types):
     hard_events = {
         "MARKET_SIDECAR_ACTIVE",
         "MARKET_CIRCUIT_BREAKER_ACTIVE",
+        "MARKET_CRASH_RISK",
         "MARKET_VI_ACTIVE",
         "MARKET_FOREIGN_SELL_PRESSURE",
         "ORDERBOOK_ASK_IMBALANCE",
@@ -524,6 +530,7 @@ def _has_hard_pullback_risk(summary, event_types, settings=None):
     hard_events = {
         "MARKET_SIDECAR_ACTIVE",
         "MARKET_CIRCUIT_BREAKER_ACTIVE",
+        "MARKET_CRASH_RISK",
         "MARKET_VI_ACTIVE",
         "MARKET_FOREIGN_SELL_PRESSURE",
         "ORDERBOOK_ASK_IMBALANCE",

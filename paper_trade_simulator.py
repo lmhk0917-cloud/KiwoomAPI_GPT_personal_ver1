@@ -106,7 +106,8 @@ def evaluate_signal(store, signal, allow_partial=False):
 
     end_time = entry_time + timedelta(minutes=max(HORIZONS_MIN))
     fetch_end_time = end_time + timedelta(minutes=COMPLETION_GRACE_MINUTES)
-    last_tick_time = fetch_last_tick_time(store, signal["code"], entry_time, fetch_end_time)
+    future_ticks = fetch_future_ticks(store, signal["code"], entry_time, fetch_end_time)
+    last_tick_time = parse_dt(future_ticks[-1]["received_at"]) if future_ticks else None
     if not last_tick_time:
         return None
 
@@ -121,7 +122,7 @@ def evaluate_signal(store, signal, allow_partial=False):
 
     evaluation_minutes = max(completed_horizons)
     evaluation_end_time = entry_time + timedelta(minutes=evaluation_minutes)
-    stats_eval = fetch_price_stats(store, signal["code"], entry_time, evaluation_end_time)
+    stats_eval = price_stats_from_ticks(future_ticks, entry_time, evaluation_end_time)
 
     if not stats_eval or stats_eval["max_price"] is None or stats_eval["min_price"] is None:
         return None
@@ -129,9 +130,9 @@ def evaluate_signal(store, signal, allow_partial=False):
     stats_30m = None
     stats_60m = None
     if 30 in completed_horizons:
-        stats_30m = fetch_price_stats(store, signal["code"], entry_time, entry_time + timedelta(minutes=30))
+        stats_30m = price_stats_from_ticks(future_ticks, entry_time, entry_time + timedelta(minutes=30))
     if 60 in completed_horizons:
-        stats_60m = fetch_price_stats(store, signal["code"], entry_time, end_time)
+        stats_60m = price_stats_from_ticks(future_ticks, entry_time, end_time)
 
     result = {
         "signal_id": signal["id"],
@@ -151,11 +152,9 @@ def evaluate_signal(store, signal, allow_partial=False):
     for minutes in HORIZONS_MIN:
         key = "return_{}m_pct".format(minutes)
         if minutes in completed_horizons:
-            horizon_price = fetch_price_at_or_after(
-                store,
-                signal["code"],
+            horizon_price = find_price_at_or_after(
+                future_ticks,
                 entry_time + timedelta(minutes=minutes),
-                fetch_end_time,
             )
             result[key] = pct_from_entry(horizon_price, entry_price)
         else:
@@ -164,9 +163,8 @@ def evaluate_signal(store, signal, allow_partial=False):
     target_1 = _to_float(signal["target_1"]) if "target_1" in signal.keys() else None
     target_2 = _to_float(signal["target_2"]) if "target_2" in signal.keys() else None
     stop_loss = _to_float(signal["stop_loss"]) if "stop_loss" in signal.keys() else None
-    hit_info = evaluate_levels_sql(
-        store,
-        signal["code"],
+    hit_info = evaluate_levels_from_ticks(
+        future_ticks,
         entry_time,
         evaluation_end_time,
         target_1=target_1,
@@ -358,6 +356,85 @@ def find_price_at_or_after(ticks, target_time):
             return _to_float(row["price"])
 
     return _to_float(ticks[-1]["price"]) if ticks else None
+
+
+def price_stats_from_ticks(ticks, start_time, end_time):
+    """Return min/max price from pre-fetched ticks in the requested window."""
+    prices = []
+    for row in ticks:
+        received_at = parse_dt(row["received_at"])
+        if received_at and start_time <= received_at <= end_time:
+            price = _to_float(row["price"])
+            if price is not None:
+                prices.append(price)
+
+    if not prices:
+        return {"max_price": None, "min_price": None}
+    return {
+        "max_price": max(prices),
+        "min_price": min(prices),
+    }
+
+
+def evaluate_levels_from_ticks(
+    ticks,
+    start_time,
+    end_time,
+    target_1=None,
+    target_2=None,
+    stop_loss=None,
+    horizon_minutes=60,
+):
+    """Evaluate target/stop first-touch times from pre-fetched ticks."""
+    target_1_time = first_touch_time_from_ticks(ticks, start_time, end_time, target_1, direction="above")
+    target_2_time = first_touch_time_from_ticks(ticks, start_time, end_time, target_2, direction="above")
+    stop_time = first_touch_time_from_ticks(ticks, start_time, end_time, stop_loss, direction="below")
+
+    target_1_hit = target_1_time is not None
+    target_2_hit = target_2_time is not None
+    stop_loss_hit = stop_time is not None
+
+    if stop_loss_hit and (not target_1_hit or stop_time < target_1_time):
+        outcome_label = "stop_before_target"
+    elif target_2_hit and (not stop_loss_hit or target_2_time <= stop_time):
+        outcome_label = "target_2_before_stop"
+    elif target_1_hit and (not stop_loss_hit or target_1_time <= stop_time):
+        outcome_label = "target_1_before_stop"
+    elif target_2_hit:
+        outcome_label = "target_2_after_stop"
+    elif target_1_hit:
+        outcome_label = "target_1_after_stop"
+    else:
+        outcome_label = "no_level_hit_{}m".format(horizon_minutes)
+
+    return {
+        "target_1_hit": target_1_hit,
+        "target_2_hit": target_2_hit,
+        "stop_loss_hit": stop_loss_hit,
+        "target_1_hit_at": format_dt(target_1_time),
+        "target_2_hit_at": format_dt(target_2_time),
+        "stop_loss_hit_at": format_dt(stop_time),
+        "outcome_label": outcome_label,
+    }
+
+
+def first_touch_time_from_ticks(ticks, start_time, end_time, level, direction):
+    if level is None:
+        return None
+
+    for row in ticks:
+        received_at = parse_dt(row["received_at"])
+        if not received_at or received_at < start_time or received_at > end_time:
+            continue
+        price = _to_float(row["price"])
+        if price is None:
+            continue
+        if direction == "above" and price >= level:
+            return received_at
+        if direction == "below" and price <= level:
+            return received_at
+
+    return None
 
 
 def ticks_until(ticks, end_time):

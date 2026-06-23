@@ -20,6 +20,9 @@ from config import (
     FORCE_GPT_MIN_CONFIRMATIONS,
     FORCE_GPT_RETURN_1BAR_PCT,
     FORCE_GPT_VOLUME_RATIO,
+    EVENT_MARKET_CIRCUIT_BREAKER_INFER_PCT,
+    EVENT_MARKET_CRASH_MIN_INDEX_COUNT,
+    EVENT_MARKET_CRASH_WARNING_PCT,
 )
 
 
@@ -38,6 +41,7 @@ def detect_gpt_events(summary, settings=None):
     _detect_trend_events(events, timeframe, settings)
     _detect_orderbook_events(events, summary, settings)
     _detect_market_status_events(events, summary)
+    _detect_market_index_crash_events(events, summary, settings)
     _detect_market_flow_events(events, summary, settings)
     _detect_force_gpt_intraday_event(events, timeframe, summary, settings)
 
@@ -264,6 +268,95 @@ def _detect_market_status_events(events, summary):
             "message": "Volatility interruption state is active",
             "value": market_status.get("market") or "market",
         })
+
+
+def _detect_market_index_crash_events(events, summary, settings=None):
+    """Infer market-wide crash/circuit risk from live index snapshots."""
+    market_context = summary.get("market_context") or {}
+    market_indices = market_context.get("market_indices") or {}
+    if not market_indices:
+        return
+
+    warning_pct = _to_float(_setting(
+        settings,
+        "EVENT_MARKET_CRASH_WARNING_PCT",
+        EVENT_MARKET_CRASH_WARNING_PCT,
+    ))
+    circuit_pct = _to_float(_setting(
+        settings,
+        "EVENT_MARKET_CIRCUIT_BREAKER_INFER_PCT",
+        EVENT_MARKET_CIRCUIT_BREAKER_INFER_PCT,
+    ))
+    min_index_count = _setting(
+        settings,
+        "EVENT_MARKET_CRASH_MIN_INDEX_COUNT",
+        EVENT_MARKET_CRASH_MIN_INDEX_COUNT,
+    )
+    try:
+        min_index_count = max(int(min_index_count), 1)
+    except (TypeError, ValueError):
+        min_index_count = EVENT_MARKET_CRASH_MIN_INDEX_COUNT
+
+    if warning_pct is None:
+        warning_pct = EVENT_MARKET_CRASH_WARNING_PCT
+    if circuit_pct is None:
+        circuit_pct = EVENT_MARKET_CIRCUIT_BREAKER_INFER_PCT
+
+    index_changes = _market_index_changes(market_indices)
+    crash_items = {
+        key: value
+        for key, value in index_changes.items()
+        if value <= warning_pct
+    }
+    circuit_items = {
+        key: value
+        for key, value in index_changes.items()
+        if value <= circuit_pct
+    }
+
+    event_types = {event.get("type") for event in events or []}
+    if (
+        len(circuit_items) >= min_index_count
+        and "MARKET_CIRCUIT_BREAKER_ACTIVE" not in event_types
+    ):
+        events.append({
+            "type": "MARKET_CIRCUIT_BREAKER_ACTIVE",
+            "timeframe": "market",
+            "message": "Circuit-breaker-level market drop inferred from index snapshots",
+            "value": {
+                "source": "market_indices",
+                "threshold_pct": circuit_pct,
+                "indices": circuit_items,
+            },
+        })
+        event_types.add("MARKET_CIRCUIT_BREAKER_ACTIVE")
+
+    if len(crash_items) >= min_index_count and "MARKET_CRASH_RISK" not in event_types:
+        events.append({
+            "type": "MARKET_CRASH_RISK",
+            "timeframe": "market",
+            "message": "Broad market crash risk inferred from index snapshots",
+            "value": {
+                "source": "market_indices",
+                "threshold_pct": warning_pct,
+                "indices": crash_items,
+            },
+        })
+
+
+def _market_index_changes(market_indices):
+    changes = {}
+    for key in (
+        "kospi_change_pct",
+        "kospi200_change_pct",
+        "kosdaq_change_pct",
+        "kosdaq150_change_pct",
+        "kospi200_futures_change_pct",
+    ):
+        value = _to_float(market_indices.get(key))
+        if value is not None:
+            changes[key] = value
+    return changes
 
 
 def _detect_market_flow_events(events, summary, settings=None):

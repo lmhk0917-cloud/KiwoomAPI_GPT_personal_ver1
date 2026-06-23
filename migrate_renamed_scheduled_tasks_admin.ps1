@@ -46,7 +46,7 @@ foreach ($taskName in ($oldTasks + $newTasks)) {
 }
 
 .\register_openapi_bootstrap_task.ps1
-.\register_market_day_task.ps1 -OpenApiTaskName KiwoomCoreQuantOpenAPIBootstrap
+.\register_market_day_task.ps1 -AllowExistingKiwoom -KillResidualBeforeStart
 .\check_openapi_bootstrap_task.ps1
 
 Write-Host "RENAMED_SCHEDULED_TASK_MIGRATION_STATUS=ok"

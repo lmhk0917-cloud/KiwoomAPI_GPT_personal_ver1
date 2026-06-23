@@ -6,6 +6,7 @@ import json
 import os
 import sqlite3
 import sys
+import threading
 import tkinter as tk
 import webbrowser
 from datetime import datetime, timedelta
@@ -218,6 +219,9 @@ class KiwoomFocusedDashboard(object):
         self.symbols_path = symbols_path
         self.refresh_ms = max(5, int(refresh_sec)) * 1000
         self.snapshot = {}
+        self.refresh_running = False
+        self.refresh_after_id = None
+        self.refresh_requested_at = None
         self.root.title("Kiwoom Focused Dashboard")
         self.root.geometry("1280x820+80+60")
         self.root.minsize(980, 640)
@@ -257,7 +261,8 @@ class KiwoomFocusedDashboard(object):
 
         toolbar = ttk.Frame(self.root, padding=(16, 8))
         toolbar.pack(fill="x")
-        ttk.Button(toolbar, text="Refresh", command=self.refresh).pack(side="left")
+        self.refresh_button = ttk.Button(toolbar, text="Refresh", command=self.refresh)
+        self.refresh_button.pack(side="left")
         ttk.Button(toolbar, text="Export HTML", command=self.export_html).pack(side="left", padx=(6, 0))
         ttk.Button(toolbar, text="Open HTML", command=self.open_html).pack(side="left", padx=(4, 0))
         ttk.Label(toolbar, text="Symbols").pack(side="left", padx=(12, 4))
@@ -417,13 +422,42 @@ class KiwoomFocusedDashboard(object):
         return tree
 
     def refresh(self):
+        if self.refresh_running:
+            self.status_var.set("Refresh already running")
+            return
+        if self.refresh_after_id is not None:
+            try:
+                self.root.after_cancel(self.refresh_after_id)
+            except tk.TclError:
+                pass
+            self.refresh_after_id = None
+        self.refresh_running = True
+        self.refresh_requested_at = _now()
+        self.status_var.set("Refreshing...")
+        self.refresh_button.configure(state="disabled")
+        worker = threading.Thread(target=self._load_snapshot_worker, daemon=True)
+        worker.start()
+
+    def _load_snapshot_worker(self):
         try:
-            self.snapshot = build_dashboard_snapshot(self.db_path, self.symbols)
-            self._render()
-            self.status_var.set("Last refresh ok")
+            snapshot = build_dashboard_snapshot(self.db_path, self.symbols)
+            self.root.after(0, lambda: self._finish_refresh(snapshot, None))
         except Exception as exc:
-            self.status_var.set("Refresh failed: {}".format(exc))
-        self.root.after(self.refresh_ms, self.refresh)
+            self.root.after(0, lambda exc=exc: self._finish_refresh(None, exc))
+
+    def _finish_refresh(self, snapshot, error):
+        try:
+            if error is not None:
+                self.status_var.set("Refresh failed: {}".format(error))
+                return
+            self.snapshot = snapshot or {}
+            self._render()
+            generated_at = self.snapshot.get("generated_at") or "-"
+            self.status_var.set("Refresh ok {} | data {}".format(self.refresh_requested_at or "-", generated_at))
+        finally:
+            self.refresh_running = False
+            self.refresh_button.configure(state="normal")
+            self.refresh_after_id = self.root.after(self.refresh_ms, self.refresh)
 
     def _render(self):
         snapshot = self.snapshot

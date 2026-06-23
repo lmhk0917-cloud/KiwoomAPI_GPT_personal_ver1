@@ -15,7 +15,10 @@ try {
 $projectDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $projectDir
 
+$projectDirForPython = $projectDir.Replace("\", "\\")
 $query = @"
+import sys
+sys.path.insert(0, r"$projectDirForPython")
 import sqlite3, app_paths
 conn = sqlite3.connect(app_paths.DEFAULT_DB_PATH)
 cur = conn.cursor()
@@ -45,7 +48,10 @@ while ($true) {
   Write-Host "Kiwoom realtime report" -ForegroundColor Cyan
   Write-Host ("updated_at: {0}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"))
   Write-Host ""
-  & $Python -c $query
+  $queryPath = Join-Path $env:TEMP "kiwoom_realtime_report_query.py"
+  $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+  [System.IO.File]::WriteAllText($queryPath, $query, $utf8NoBom)
+  & $Python $queryPath
 
   if ($ShowRawLog) {
     Write-Host ""
