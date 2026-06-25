@@ -103,6 +103,55 @@ class KiwoomFocusedDashboardTests(unittest.TestCase):
                 "manual", "high", "macro summary", "{}",
             ))
             conn.execute("""
+                INSERT INTO market_context_snapshots (
+                    collected_at, scope, code, section, source, asof,
+                    reliability, weight, summary, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                "2026-06-17 09:02:00.000000", "global", None,
+                "market_investor_flow", "OPT10051", "2026-06-17 09:02:00",
+                "sector_sum_proxy_pending_live_unit_validation", "medium", "market flow",
+                json.dumps({
+                    "kospi_sector_count": 28,
+                    "kospi_individual_net_value": 1200,
+                    "kospi_foreign_net_value": -500,
+                    "kospi_institution_net_value": -700,
+                    "kosdaq_sector_count": 32,
+                    "kosdaq_individual_net_value": 300,
+                    "kosdaq_foreign_net_value": -100,
+                    "kosdaq_institution_net_value": -200,
+                    "combined_individual_net_value": 1500,
+                    "combined_foreign_net_value": -600,
+                    "combined_institution_net_value": -900,
+                }),
+            ))
+            conn.execute("""
+                INSERT INTO market_context_snapshots (
+                    collected_at, scope, code, section, source, asof,
+                    reliability, weight, summary, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                "2026-06-17 09:02:10.000000", "global", None,
+                "market_program_trading", "OPT90005", "2026-06-17 09:02:10",
+                "live", "medium", "program flow",
+                json.dumps({"market": "KOSPI", "total_net_value": -12345}),
+            ))
+            conn.execute("""
+                INSERT INTO market_context_snapshots (
+                    collected_at, scope, code, section, source, asof,
+                    reliability, weight, summary, payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                "2026-06-17 09:02:20.000000", "code", "005930",
+                "investor_flow", "OPT10059", "2026-06-17 09:02:20",
+                "live", "medium", "symbol flow",
+                json.dumps({
+                    "individual_net_value": 10,
+                    "foreign_net_value": -4,
+                    "institution_net_value": -6,
+                }),
+            ))
+            conn.execute("""
                 INSERT INTO gpt_call_logs (
                     started_at, finished_at, status, requested_count, codes,
                     model, duration_ms, prompt_chars, payload_original_chars,
@@ -178,8 +227,14 @@ class KiwoomFocusedDashboardTests(unittest.TestCase):
             self.assertEqual(1, snapshot["horizon_summary"][0]["evaluated_count"])
             self.assertGreaterEqual(len(snapshot["target_exit_scenarios"]), 1)
             self.assertEqual("positive_expectancy", snapshot["recent_quant_feedback"][0]["quality_label"])
+            flow_symbols = {row["symbol"] for row in snapshot["investor_flows"]}
+            self.assertIn("KOSPI", flow_symbols)
+            self.assertIn("KOSDAQ", flow_symbols)
+            self.assertIn("005930", flow_symbols)
             self.assertIn("Kiwoom Focused Dashboard", html)
             self.assertIn("005930", html)
+            self.assertIn("Investor Flow", html)
+            self.assertIn("KOSDAQ", html)
             self.assertIn("Horizon Summary", html)
             self.assertIn("Target Exit Scenarios", html)
             self.assertIn("Quant / GPT / Paper", html)

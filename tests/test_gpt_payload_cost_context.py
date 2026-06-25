@@ -73,6 +73,54 @@ class GPTPayloadCostContextTests(unittest.TestCase):
         self.assertEqual(["A", "B"], list(context["benchmark_etfs"].keys()))
         self.assertEqual(2, len(context["data_quality"]["missing_sections"]))
 
+    def test_short_term_event_context_survives_compression(self):
+        summaries = [
+            {
+                "code": "000660",
+                "name": "SK Hynix",
+                "timeframes": {},
+                "market_context": {
+                    "short_term_event_context": {
+                        "asof": "2026-06-25 09:00:00",
+                        "source": "user_memo",
+                        "reliability": "user_supplied_unverified_event_context",
+                        "bias": "bullish_memory_supercycle_with_gap_up_risk",
+                        "summary": "Micron SCA and HBM supply shortage are positive, but do not chase the open.",
+                        "event_tags": [
+                            "EVENT_MICRON_EARNINGS_BEAT",
+                            "EVENT_MICRON_SCA_SUPERCYCLE",
+                            "EVENT_HBM_SUPPLY_SHORTAGE",
+                        ],
+                        "confirmation_required": [
+                            "VWAP hold",
+                            "foreign flow support",
+                            "semiconductor peer confirmation",
+                        ],
+                        "avoid_conditions": [
+                            "opening gap chase",
+                            "VWAP loss",
+                            "foreign selling",
+                        ],
+                    },
+                },
+            }
+        ]
+
+        compressed, _ = compress_market_summaries_for_gpt(
+            summaries,
+            settings={"GPT_INPUT_MAX_CONTEXT_ITEMS": 2},
+        )
+        event_context = compressed[0]["market_context"]["short_term_event_context"]
+
+        self.assertEqual("user_supplied_unverified_event_context", event_context["reliability"])
+        self.assertEqual("bullish_memory_supercycle_with_gap_up_risk", event_context["bias"])
+        self.assertEqual(
+            ["EVENT_MICRON_EARNINGS_BEAT", "EVENT_MICRON_SCA_SUPERCYCLE"],
+            event_context["event_tags"],
+        )
+        self.assertEqual(["VWAP hold", "foreign flow support"], event_context["confirmation_required"])
+        self.assertEqual(["opening gap chase", "VWAP loss"], event_context["avoid_conditions"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -26,6 +26,25 @@ SYSTEM_PROMPT = (
 )
 
 
+def numeric_conventions():
+    return {
+        "return_pct_fields_are_percent_points": True,
+        "do_not_rescale_pct_values": True,
+        "report_pct_values_verbatim": True,
+        "rounding": "Keep *_pct return values as given, or round to 3 decimals. Never multiply by 100.",
+        "examples": {
+            "0.185": "0.185%, not 18.5%",
+            "0.924": "0.924%, not 92.4%",
+            "-0.125": "-0.125%, not -12.5%",
+        },
+        "interpretation": {
+            "avg_return_60m_pct": "Already a percent return over 60 minutes.",
+            "avg_net_return_60m_pct": "Already a percent return after estimated round-trip cost.",
+            "win_rate_60m_pct": "Already a percent rate on a 0 to 100 scale.",
+        },
+    }
+
+
 def main():
     args = parse_args()
     setup_runtime_logging("post_market_feedback_gpt")
@@ -54,6 +73,7 @@ def main():
     )
     finished_at = datetime.now()
     result = response.choices[0].message.content
+    unit_warnings = validate_result_units(result, payload)
 
     output_path = save_result(
         result=result,
@@ -62,6 +82,7 @@ def main():
         finished_at=finished_at,
         model=getattr(response, "model", GPT_MODEL),
         usage=extract_usage(response),
+        unit_warnings=unit_warnings,
     )
 
     print("========== Post-Market Feedback GPT ==========")
@@ -74,6 +95,10 @@ def main():
     print("prompt_tokens:", usage.get("prompt_tokens"))
     print("completion_tokens:", usage.get("completion_tokens"))
     print("total_tokens:", usage.get("total_tokens"))
+    if unit_warnings:
+        print("unit_warnings:")
+        for warning in unit_warnings:
+            print(" -", warning)
     print()
     print(result)
 
@@ -111,8 +136,65 @@ def build_feedback_payload(conn, args):
             "min_sample": args.min_sample,
         },
         "paper_trade_report": paper_report,
+        "authoritative_metrics": build_authoritative_metrics(paper_report),
         "text_context": load_text_context(args.market_context),
+        "numeric_conventions": numeric_conventions(),
     }
+
+
+def build_authoritative_metrics(paper_report):
+    overview = paper_report.get("overview", {})
+    sample = paper_report.get("sample_summary", {})
+    return {
+        "source": "paper_trade_report",
+        "usage_rule": "Use these values as the authoritative numbers in prose. *_pct values are already percentages.",
+        "overview": select_metric_fields(overview, [
+            "signal_count",
+            "evaluated_count",
+            "evaluated_60m_count",
+            "partial_evaluated_count",
+            "pending_count",
+            "avg_return_30m_pct",
+            "avg_return_60m_pct",
+            "avg_net_return_30m_pct",
+            "avg_net_return_60m_pct",
+            "win_rate_60m_pct",
+            "net_win_rate_60m_pct",
+            "directional_success_60m_pct",
+            "stop_loss_hit_rate_pct",
+        ]),
+        "sample_summary": sample,
+        "by_action": authoritative_group_rows(paper_report.get("by_action", [])),
+        "by_decision_side": authoritative_group_rows(paper_report.get("by_decision_side", [])),
+        "by_code": authoritative_group_rows(paper_report.get("by_code", [])),
+        "by_code_action": authoritative_group_rows(paper_report.get("by_code_action", [])),
+    }
+
+
+def authoritative_group_rows(rows):
+    fields = [
+        "group_name",
+        "signal_count",
+        "evaluated_count",
+        "evaluated_60m_count",
+        "partial_evaluated_count",
+        "pending_count",
+        "avg_return_60m_pct",
+        "avg_net_return_60m_pct",
+        "win_rate_60m_pct",
+        "net_win_rate_60m_pct",
+        "directional_success_60m_pct",
+        "stop_loss_hit_rate_pct",
+        "sample_label",
+        "profit_label",
+        "directional_label",
+        "interpretation_hint",
+    ]
+    return [select_metric_fields(row, fields) for row in rows]
+
+
+def select_metric_fields(row, fields):
+    return {field: row.get(field) for field in fields if field in row}
 
 
 def load_text_context(path):
@@ -141,8 +223,22 @@ def load_text_context(path):
 
 def build_prompt(payload):
     data_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
+    unit_guard = """
+CRITICAL NUMERIC UNIT RULES:
+- Fields ending in _pct are already percent values.
+- Return fields such as avg_return_60m_pct and avg_net_return_60m_pct are percent points, not decimal fractions.
+- Example: 0.185 means 0.185%, not 18.5%.
+- Example: 0.924 means 0.924%, not 92.4%.
+- Example: -0.125 means -0.125%, not -12.5%.
+- Never multiply *_pct values by 100.
+- If summarizing returns, copy values from avg_return_*_pct and avg_net_return_*_pct as-is with a % suffix.
+- Do not call a result profitable when avg_net_return_60m_pct is negative.
+- Prefer authoritative_metrics for every quoted number.
+- Keep profit_label and directional_label separate.
+- Keep partial_evaluated_count and pending_count separate from 60m headline returns.
+"""
 
-    return """
+    return unit_guard + """
 너는 장마감 후 주식 분석 시스템의 validation signal을 검토하는 AI다.
 아래 데이터는 저장된 paper-trade 결과, quant score, GPT 판단, 시장 컨텍스트다.
 
@@ -204,7 +300,48 @@ def build_prompt(payload):
 """.format(data=data_json)
 
 
-def save_result(result, payload, started_at, finished_at, model, usage):
+def collect_return_pct_values(value, path="payload"):
+    values = []
+    if isinstance(value, dict):
+        for key, child in value.items():
+            child_path = "{}.{}".format(path, key)
+            if (
+                key.endswith("_pct")
+                and ("return" in key or "max_gain" in key or "max_loss" in key)
+                and isinstance(child, (int, float))
+            ):
+                values.append((child_path, float(child)))
+            else:
+                values.extend(collect_return_pct_values(child, child_path))
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            values.extend(collect_return_pct_values(child, "{}[{}]".format(path, index)))
+    return values
+
+
+def validate_result_units(result, payload):
+    if not result:
+        return []
+
+    warnings = []
+    result_text = str(result)
+    seen = set()
+    for path, value in collect_return_pct_values(payload.get("paper_trade_report", {}), "paper_trade_report"):
+        if abs(value) < 0.001 or abs(value) >= 10:
+            continue
+        scaled = value * 100
+        for decimals in (1, 2, 3):
+            scaled_text = "{:.{}f}".format(scaled, decimals).rstrip("0").rstrip(".")
+            needle = "{}%".format(scaled_text)
+            if needle in result_text and (path, needle) not in seen:
+                warnings.append(
+                    "possible pct rescale: {}={} may have been reported as {}".format(path, value, needle)
+                )
+                seen.add((path, needle))
+    return warnings
+
+
+def save_result(result, payload, started_at, finished_at, model, usage, unit_warnings=None):
     ensure_app_dirs()
     stamp = finished_at.strftime("%Y%m%d_%H%M%S")
     output_path = os.path.join(EXPORTS_DIR, "post_market_feedback_{}.md".format(stamp))
@@ -217,6 +354,11 @@ def save_result(result, payload, started_at, finished_at, model, usage):
         fp.write("- prompt_tokens: {}\n".format(usage.get("prompt_tokens")))
         fp.write("- completion_tokens: {}\n".format(usage.get("completion_tokens")))
         fp.write("- total_tokens: {}\n\n".format(usage.get("total_tokens")))
+        if unit_warnings:
+            fp.write("## Unit Warnings\n\n")
+            for warning in unit_warnings:
+                fp.write("- {}\n".format(warning))
+            fp.write("\n")
         fp.write(result or "")
         fp.write("\n\n## Payload Snapshot\n\n")
         fp.write("```json\n")

@@ -5,6 +5,7 @@ signal so the event rules can be tuned with evidence.
 """
 
 import argparse
+from bisect import bisect_left, bisect_right
 from datetime import datetime, timedelta
 
 from app_paths import DEFAULT_DB_PATH
@@ -49,9 +50,15 @@ def main():
     store = TickStore(db_path=args.db)
     signals = fetch_pending_signals(store, limit=args.limit, code=args.code, since=args.since)
 
+    tick_cache = TickWindowCache(store, signals)
     evaluated = 0
     for signal in signals:
-        result = evaluate_signal(store, signal, allow_partial=args.allow_partial)
+        result = evaluate_signal(
+            store,
+            signal,
+            allow_partial=args.allow_partial,
+            tick_cache=tick_cache,
+        )
         if result:
             store.save_paper_trade_result(result)
             evaluated += 1
@@ -96,7 +103,7 @@ def fetch_pending_signals(store, limit=100, code=None, since=None):
     return store.conn.execute(sql, params).fetchall()
 
 
-def evaluate_signal(store, signal, allow_partial=False):
+def evaluate_signal(store, signal, allow_partial=False, tick_cache=None):
     """Evaluate future returns after one signal when enough tick data exists."""
     entry_time = parse_dt(signal["detected_at"])
     entry_price = _to_float(signal["current_price"])
@@ -106,8 +113,11 @@ def evaluate_signal(store, signal, allow_partial=False):
 
     end_time = entry_time + timedelta(minutes=max(HORIZONS_MIN))
     fetch_end_time = end_time + timedelta(minutes=COMPLETION_GRACE_MINUTES)
-    future_ticks = fetch_future_ticks(store, signal["code"], entry_time, fetch_end_time)
-    last_tick_time = parse_dt(future_ticks[-1]["received_at"]) if future_ticks else None
+    if tick_cache is not None:
+        future_ticks = tick_cache.future_ticks(signal["code"], entry_time, fetch_end_time)
+    else:
+        future_ticks = fetch_future_ticks(store, signal["code"], entry_time, fetch_end_time)
+    last_tick_time = _tick_dt(future_ticks[-1]) if future_ticks else None
     if not last_tick_time:
         return None
 
@@ -348,10 +358,64 @@ def fetch_future_ticks(store, code, start_time, end_time):
     )).fetchall()
 
 
+class TickWindowCache(object):
+    """Cache code-level tick ranges for faster paper-trade feedback."""
+
+    def __init__(self, store, signals):
+        self.store = store
+        self.cache = {}
+        self._build(signals)
+
+    def _build(self, signals):
+        ranges = {}
+        for signal in signals or []:
+            entry_time = parse_dt(signal["detected_at"])
+            if not entry_time:
+                continue
+            end_time = entry_time + timedelta(
+                minutes=max(HORIZONS_MIN) + COMPLETION_GRACE_MINUTES
+            )
+            code = signal["code"]
+            current = ranges.get(code)
+            if current is None:
+                ranges[code] = [entry_time, end_time]
+            else:
+                current[0] = min(current[0], entry_time)
+                current[1] = max(current[1], end_time)
+
+        for code, (start_time, end_time) in ranges.items():
+            rows = []
+            times = []
+            for row in fetch_future_ticks(self.store, code, start_time, end_time):
+                received_at = parse_dt(row["received_at"])
+                if not received_at:
+                    continue
+                rows.append({
+                    "received_at": row["received_at"],
+                    "price": row["price"],
+                    "_dt": received_at,
+                })
+                times.append(received_at)
+            self.cache[code] = {
+                "rows": rows,
+                "times": times,
+            }
+
+    def future_ticks(self, code, start_time, end_time):
+        entry = self.cache.get(code)
+        if not entry:
+            return []
+        times = entry["times"]
+        rows = entry["rows"]
+        left = bisect_left(times, start_time)
+        right = bisect_right(times, end_time)
+        return rows[left:right]
+
+
 def find_price_at_or_after(ticks, target_time):
     """Find the first tick price at or after a target horizon."""
     for row in ticks:
-        received_at = parse_dt(row["received_at"])
+        received_at = _tick_dt(row)
         if received_at and received_at >= target_time:
             return _to_float(row["price"])
 
@@ -362,7 +426,7 @@ def price_stats_from_ticks(ticks, start_time, end_time):
     """Return min/max price from pre-fetched ticks in the requested window."""
     prices = []
     for row in ticks:
-        received_at = parse_dt(row["received_at"])
+        received_at = _tick_dt(row)
         if received_at and start_time <= received_at <= end_time:
             price = _to_float(row["price"])
             if price is not None:
@@ -423,7 +487,7 @@ def first_touch_time_from_ticks(ticks, start_time, end_time, level, direction):
         return None
 
     for row in ticks:
-        received_at = parse_dt(row["received_at"])
+        received_at = _tick_dt(row)
         if not received_at or received_at < start_time or received_at > end_time:
             continue
         price = _to_float(row["price"])
@@ -435,6 +499,12 @@ def first_touch_time_from_ticks(ticks, start_time, end_time, level, direction):
             return received_at
 
     return None
+
+
+def _tick_dt(row):
+    if isinstance(row, dict) and row.get("_dt") is not None:
+        return row.get("_dt")
+    return parse_dt(row["received_at"])
 
 
 def ticks_until(ticks, end_time):

@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 import config
 from app_paths import DEFAULT_DB_PATH, setup_runtime_logging
 from data_store import TickStore
-from paper_trade_simulator import evaluate_signal, fetch_pending_signals
+from paper_trade_simulator import TickWindowCache, evaluate_signal, fetch_pending_signals
 
 
 ROUND_TRIP_COST_PCT = (
@@ -108,9 +108,15 @@ def _since_from_args(args):
 def evaluate_pending(store, since=None, limit=500, allow_partial=False, code=None):
     """Evaluate pending saved signals and return the number of inserted rows."""
     signals = fetch_pending_signals(store, limit=limit, code=code, since=since)
+    tick_cache = TickWindowCache(store, signals)
     evaluated = 0
     for signal in signals:
-        result = evaluate_signal(store, signal, allow_partial=allow_partial)
+        result = evaluate_signal(
+            store,
+            signal,
+            allow_partial=allow_partial,
+            tick_cache=tick_cache,
+        )
         if result:
             store.save_paper_trade_result(result)
             evaluated += 1

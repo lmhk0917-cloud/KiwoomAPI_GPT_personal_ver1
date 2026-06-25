@@ -224,6 +224,10 @@ def _compress_market_context(context, settings=None, include_global_context=True
             "source",
         ]),
         "news": _compress_text_context(context.get("news"), max_items),
+        "short_term_event_context": _compress_short_term_event_context(
+            context.get("short_term_event_context"),
+            max_items,
+        ),
         "disclosures": _compress_text_context(context.get("disclosures"), max_items),
         "public_reaction": _compress_text_context(context.get("public_reaction"), max_items),
         "notes": _head(context.get("notes"), max_items),
@@ -245,6 +249,10 @@ def _compress_market_context(context, settings=None, include_global_context=True
             "source",
             "reliability",
             ]),
+            "short_term_event_context": _compress_short_term_event_context(
+                context.get("short_term_event_context"),
+                max_items,
+            ),
             "macro_context": _compress_macro_context(context.get("macro_context"), max_items),
             "market_indices": _compact_dict(context.get("market_indices"), [
             "kospi",
@@ -455,6 +463,23 @@ def _compress_macro_context(section, max_items):
         "semiconductor_index_change_pct": section.get("semiconductor_index_change_pct"),
         "next_macro_events": _head(section.get("next_macro_events"), max_items),
         "notes": _head(section.get("notes"), max_items),
+    })
+
+
+def _compress_short_term_event_context(section, max_items):
+    section = section or {}
+    return _drop_empty({
+        "asof": section.get("asof"),
+        "source": section.get("source"),
+        "reliability": section.get("reliability"),
+        "bias": section.get("bias"),
+        "summary": _truncate_text(section.get("summary")),
+        "event_tags": _head(section.get("event_tags"), max_items),
+        "affected_symbols": _head(section.get("affected_symbols"), max_items),
+        "confirmation_required": _head(section.get("confirmation_required"), max_items),
+        "avoid_conditions": _head(section.get("avoid_conditions"), max_items),
+        "action_guidance": _truncate_text(section.get("action_guidance")),
+        "risk_notes": _head(section.get("risk_notes"), max_items),
     })
 
 

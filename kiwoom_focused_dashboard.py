@@ -87,6 +87,7 @@ def build_dashboard_snapshot(db_path=DEFAULT_DB_PATH, symbols=None):
             "recent_signals": _recent_signals(conn, limit=30),
             "recent_paper": _recent_paper(conn, limit=30),
             "recent_contexts": _recent_contexts(conn, limit=30),
+            "investor_flows": _recent_investor_flows(conn, symbols=symbols),
             "recent_score_compare": _recent_score_compare(conn, limit=30),
             "recent_quant_feedback": _recent_quant_feedback(conn, limit=30),
             "horizon_summary": _horizon_summary(conn),
@@ -100,6 +101,7 @@ def build_dashboard_snapshot(db_path=DEFAULT_DB_PATH, symbols=None):
 def render_dashboard_html(snapshot):
     rows_html = "\n".join(_symbol_html(row) for row in snapshot.get("rows") or [])
     events_html = "\n".join(_event_html(row) for row in snapshot.get("recent_events") or [])
+    flow_html = "\n".join(_flow_html(row) for row in snapshot.get("investor_flows") or [])
     context_html = "\n".join(_context_html(row) for row in snapshot.get("recent_contexts") or [])
     paper_html = "\n".join(_paper_html(row) for row in snapshot.get("recent_paper") or [])
     score_html = "\n".join(_score_compare_html(row) for row in snapshot.get("recent_score_compare") or [])
@@ -181,6 +183,7 @@ th {{ color:#344054; font-size:12px; background:#f9fafb; }}
     </table>
   </section>
   <section><h2>Events By Symbol</h2><table><thead><tr><th>Time</th><th>Symbol</th><th>Event</th><th>Severity</th><th class="num">Value</th><th>Message</th></tr></thead><tbody>{events_html}</tbody></table></section>
+  <section><h2>Investor Flow</h2><table><thead><tr><th>Time</th><th>Scope</th><th>Symbol</th><th>Source</th><th class="num">Individual</th><th class="num">Foreign</th><th class="num">Institution</th><th class="num">Program</th><th>Reliability</th></tr></thead><tbody>{flow_html}</tbody></table></section>
   <section><h2>Paper Feedback</h2><table><thead><tr><th>Created</th><th>Symbol</th><th class="num">Horizon</th><th class="num">Anchor</th><th>Status</th><th class="num">Return</th><th class="num">Max</th><th class="num">Min</th><th>Outcome</th></tr></thead><tbody>{paper_html}</tbody></table></section>
   <section><h2>Horizon Summary</h2><table><thead><tr><th class="num">Min</th><th class="num">Evaluated</th><th class="num">Avg</th><th class="num">Net</th><th class="num">Win</th><th class="num">Best</th><th class="num">Worst</th></tr></thead><tbody>{horizon_html}</tbody></table></section>
   <section><h2>Target Exit Scenarios</h2><table><thead><tr><th class="num">Min</th><th class="num">Target</th><th class="num">Stop</th><th class="num">Evaluated</th><th class="num">Target First</th><th class="num">Stop First</th><th class="num">Timeout</th><th class="num">Win</th><th class="num">Net</th></tr></thead><tbody>{target_exit_html}</tbody></table></section>
@@ -201,6 +204,7 @@ th {{ color:#344054; font-size:12px; background:#f9fafb; }}
         warning_text=_e(warning_text),
         rows_html=rows_html,
         events_html=events_html,
+        flow_html=flow_html,
         paper_html=paper_html,
         horizon_html=horizon_html,
         target_exit_html=target_exit_html,
@@ -338,6 +342,11 @@ class KiwoomFocusedDashboard(object):
         self.context_tree = self._add_table_tab(bottom, "Context", ("time", "scope", "symbol", "section", "reliability", "summary"))
         self.tables_text = self._add_text_tab(bottom, "Tables", monospace=True)
         self.runtime_events_tree = self._add_runtime_table(runtime_frame, "Events", ("time", "symbol", "event", "severity", "value", "message"))
+        self.runtime_investor_flow_tree = self._add_runtime_table(
+            runtime_frame,
+            "Investor Flow",
+            ("time", "scope", "symbol", "source", "individual", "foreign", "institution", "program", "reliability"),
+        )
         self.runtime_signals_tree = self._add_runtime_table(runtime_frame, "Signals", ("time", "symbol", "decision", "score", "risk", "reason"))
         self.runtime_horizon_tree = self._add_runtime_table(
             runtime_frame,
@@ -502,6 +511,7 @@ class KiwoomFocusedDashboard(object):
         self._fill_paper(self.paper_tree, snapshot.get("recent_paper") or [])
         self._fill_context(self.context_tree, snapshot.get("recent_contexts") or [])
         self._fill_runtime_events(self.runtime_events_tree, snapshot.get("recent_events") or [])
+        self._fill_investor_flows(self.runtime_investor_flow_tree, snapshot.get("investor_flows") or [])
         self._fill_runtime_signals(self.runtime_signals_tree, snapshot.get("recent_signals") or [])
         self._fill_horizon_summary(self.runtime_horizon_tree, snapshot.get("horizon_summary") or [])
         self._fill_target_exit_scenarios(self.runtime_target_exit_tree, snapshot.get("target_exit_scenarios") or [])
@@ -680,6 +690,21 @@ class KiwoomFocusedDashboard(object):
                 _fmt(row.get("confidence_score"), 0),
                 row.get("risk_level"),
                 row.get("reason_json"),
+            ))
+
+    def _fill_investor_flows(self, tree, rows):
+        tree.delete(*tree.get_children())
+        for idx, row in enumerate(rows):
+            tree.insert("", "end", iid=str(idx), values=(
+                row.get("collected_at"),
+                row.get("scope"),
+                row.get("symbol") or "GLOBAL",
+                row.get("source") or "",
+                _fmt(row.get("individual_net_value"), 0, signed=True),
+                _fmt(row.get("foreign_net_value"), 0, signed=True),
+                _fmt(row.get("institution_net_value"), 0, signed=True),
+                _fmt(row.get("program_net_value"), 0, signed=True),
+                row.get("reliability") or "",
             ))
 
     def _fill_score_compare(self, tree, rows):
@@ -1050,6 +1075,164 @@ def _recent_contexts(conn, code=None, limit=30):
     return [dict(row) for row in rows]
 
 
+def _recent_investor_flows(conn, symbols=None, limit=40):
+    rows = []
+    seen = set()
+    for row in _latest_market_flow_rows(conn):
+        key = (row.get("scope"), row.get("symbol"), row.get("source"))
+        if key not in seen:
+            rows.append(row)
+            seen.add(key)
+
+    for row in _latest_symbol_flow_rows(conn, symbols=symbols or []):
+        key = (row.get("scope"), row.get("symbol"), row.get("source"))
+        if key not in seen:
+            rows.append(row)
+            seen.add(key)
+
+    rows.sort(key=lambda item: item.get("collected_at") or "", reverse=True)
+    return rows[:int(limit)]
+
+
+def _latest_market_flow_rows(conn):
+    rows = []
+    snapshots = conn.execute("""
+        SELECT collected_at, scope, code, section, source, reliability, summary, payload_json
+        FROM market_context_snapshots
+        WHERE scope = 'global'
+          AND section IN ('market_investor_flow', 'market_program_trading')
+        ORDER BY collected_at DESC, id DESC
+        LIMIT 20
+    """).fetchall()
+    for snapshot in snapshots:
+        payload = _load_json(snapshot["payload_json"])
+        section = snapshot["section"]
+        if section == "market_investor_flow":
+            rows.extend(_market_investor_flow_view_rows(snapshot, payload))
+        elif section == "market_program_trading":
+            rows.append(_program_flow_view_row(snapshot, payload))
+    return rows
+
+
+def _market_investor_flow_view_rows(snapshot, payload):
+    market_specs = [
+        ("KOSPI", "kospi_individual_net_value", "kospi_foreign_net_value", "kospi_institution_net_value", "kospi_sector_count"),
+        ("KOSDAQ", "kosdaq_individual_net_value", "kosdaq_foreign_net_value", "kosdaq_institution_net_value", "kosdaq_sector_count"),
+    ]
+    rows = []
+    for market, individual_key, foreign_key, institution_key, count_key in market_specs:
+        if not any(_has_value(payload.get(key)) for key in (individual_key, foreign_key, institution_key)):
+            continue
+        rows.append({
+            "collected_at": snapshot["collected_at"],
+            "scope": "market",
+            "symbol": market,
+            "source": snapshot["source"] or "OPT10051",
+            "individual_net_value": payload.get(individual_key),
+            "foreign_net_value": payload.get(foreign_key),
+            "institution_net_value": payload.get(institution_key),
+            "program_net_value": None,
+            "reliability": _flow_reliability(snapshot, payload, count_key),
+        })
+
+    if any(_has_value(payload.get(key)) for key in (
+        "combined_individual_net_value",
+        "combined_foreign_net_value",
+        "combined_institution_net_value",
+    )):
+        rows.append({
+            "collected_at": snapshot["collected_at"],
+            "scope": "market",
+            "symbol": "KOSPI+KOSDAQ",
+            "source": snapshot["source"] or "OPT10051",
+            "individual_net_value": payload.get("combined_individual_net_value"),
+            "foreign_net_value": payload.get("combined_foreign_net_value"),
+            "institution_net_value": payload.get("combined_institution_net_value"),
+            "program_net_value": None,
+            "reliability": snapshot["reliability"],
+        })
+    return rows
+
+
+def _program_flow_view_row(snapshot, payload):
+    return {
+        "collected_at": snapshot["collected_at"],
+        "scope": "market",
+        "symbol": payload.get("market") or "KOSPI",
+        "source": snapshot["source"] or "OPT90005",
+        "individual_net_value": None,
+        "foreign_net_value": None,
+        "institution_net_value": None,
+        "program_net_value": payload.get("total_net_value"),
+        "reliability": snapshot["reliability"],
+    }
+
+
+def _latest_symbol_flow_rows(conn, symbols):
+    normalized = [str(symbol).strip() for symbol in symbols or [] if str(symbol).strip()]
+    if not normalized:
+        return []
+    placeholders = ",".join("?" for _ in normalized)
+    snapshots = conn.execute("""
+        SELECT collected_at, scope, code, section, source, reliability, summary, payload_json
+        FROM market_context_snapshots
+        WHERE scope = 'code'
+          AND section IN ('investor_flow', 'program_trading')
+          AND code IN ({placeholders})
+        ORDER BY collected_at DESC, id DESC
+        LIMIT ?
+    """.format(placeholders=placeholders), normalized + [max(20, len(normalized) * 4)]).fetchall()
+
+    latest_by_key = {}
+    for snapshot in snapshots:
+        key = (snapshot["code"], snapshot["section"])
+        if key not in latest_by_key:
+            latest_by_key[key] = snapshot
+
+    rows = []
+    for snapshot in latest_by_key.values():
+        payload = _load_json(snapshot["payload_json"])
+        if snapshot["section"] == "investor_flow":
+            rows.append({
+                "collected_at": snapshot["collected_at"],
+                "scope": "code",
+                "symbol": snapshot["code"],
+                "source": snapshot["source"] or "OPT10059",
+                "individual_net_value": payload.get("individual_net_value"),
+                "foreign_net_value": payload.get("foreign_net_value"),
+                "institution_net_value": payload.get("institution_net_value"),
+                "program_net_value": None,
+                "reliability": snapshot["reliability"],
+            })
+        elif snapshot["section"] == "program_trading":
+            rows.append({
+                "collected_at": snapshot["collected_at"],
+                "scope": "code",
+                "symbol": snapshot["code"],
+                "source": snapshot["source"] or "realtime",
+                "individual_net_value": None,
+                "foreign_net_value": payload.get("foreign_net_value"),
+                "institution_net_value": payload.get("institution_net_value"),
+                "program_net_value": payload.get("program_net_value"),
+                "reliability": snapshot["reliability"],
+            })
+    return rows
+
+
+def _flow_reliability(snapshot, payload, count_key):
+    reliability = snapshot["reliability"] or ""
+    count = payload.get(count_key)
+    if count is None:
+        return reliability
+    if reliability:
+        return "{} | sectors={}".format(reliability, count)
+    return "sectors={}".format(count)
+
+
+def _has_value(value):
+    return value is not None and value != ""
+
+
 def _recent_ticks(conn, code=None, limit=120):
     rows = conn.execute("""
         SELECT received_at, code, price, change_rate, acc_volume, tick_volume
@@ -1261,6 +1444,24 @@ def _context_html(row):
     return """<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>""".format(
         _e(row.get("collected_at")), _e(row.get("scope")), _e(row.get("code") or "GLOBAL"),
         _e(row.get("section")), _e(row.get("reliability")), _e(row.get("summary")),
+    )
+
+
+def _flow_html(row):
+    return """<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td class="num {}">{}</td><td class="num {}">{}</td><td class="num {}">{}</td><td class="num {}">{}</td><td>{}</td></tr>""".format(
+        _e(row.get("collected_at")),
+        _e(row.get("scope")),
+        _e(row.get("symbol") or "GLOBAL"),
+        _e(row.get("source") or ""),
+        _num_class(row.get("individual_net_value")),
+        _fmt(row.get("individual_net_value"), 0, signed=True),
+        _num_class(row.get("foreign_net_value")),
+        _fmt(row.get("foreign_net_value"), 0, signed=True),
+        _num_class(row.get("institution_net_value")),
+        _fmt(row.get("institution_net_value"), 0, signed=True),
+        _num_class(row.get("program_net_value")),
+        _fmt(row.get("program_net_value"), 0, signed=True),
+        _e(row.get("reliability") or ""),
     )
 
 

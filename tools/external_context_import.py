@@ -31,6 +31,7 @@ DEFAULT_SECTIONS = {
     "program_trading",
     "market_program_trading",
     "news",
+    "short_term_event_context",
     "disclosures",
     "public_reaction",
 }

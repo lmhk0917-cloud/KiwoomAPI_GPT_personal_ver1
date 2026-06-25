@@ -7,6 +7,7 @@ simulation, event detector, notifier, and database layer.
 WATCH_CODES = {
     "005930": "삼성전자",
     "000660": "SK하이닉스",
+    "042700": "Hanmi Semiconductor",
 }
 
 MARKET_BENCHMARK_CODES = {

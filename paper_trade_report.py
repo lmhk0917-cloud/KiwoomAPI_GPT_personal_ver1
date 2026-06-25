@@ -88,6 +88,7 @@ def build_report(conn, code=None, days=None, min_sample=5, recent_limit=10):
             "days": days,
             "min_sample": min_sample,
         },
+        "sample_summary": sample_summary(row_to_dict(overview), min_sample=min_sample),
         "overview": row_to_dict(overview),
         "by_action": annotate_rows(action_rows, min_sample=min_sample),
         "by_decision_side": annotate_rows(decision_side_rows, min_sample=min_sample),
@@ -315,10 +316,107 @@ def annotate_rows(rows, min_sample):
     annotated = []
     for row in rows:
         item = row_to_dict(row)
+        item["sample_label"] = sample_label(item, min_sample=min_sample)
+        item["profit_label"] = profit_label(item, min_sample=min_sample)
+        item["directional_label"] = directional_label(item, min_sample=min_sample)
+        item["interpretation_hint"] = interpretation_hint(item)
         item["quality_label"] = quality_label(item, min_sample=min_sample)
         item["tuning_hint"] = tuning_hint(item)
         annotated.append(item)
     return annotated
+
+
+def sample_summary(overview, min_sample):
+    evaluated = overview.get("evaluated_count") or 0
+    evaluated_60m = overview.get("evaluated_60m_count") or 0
+    partial = overview.get("partial_evaluated_count") or 0
+    pending = overview.get("pending_count") or 0
+    return {
+        "sample_label": sample_label(overview, min_sample=min_sample),
+        "evaluated_count": evaluated,
+        "evaluated_60m_count": evaluated_60m,
+        "partial_evaluated_count": partial,
+        "pending_count": pending,
+        "full_60m_ratio_pct": round((evaluated_60m / evaluated) * 100, 2) if evaluated else None,
+        "headline_rule": "Use 60m return headlines only from evaluated_60m_count; keep partial and pending counts separate.",
+    }
+
+
+def sample_label(row, min_sample):
+    evaluated = row.get("evaluated_count") or 0
+    evaluated_60m = row.get("evaluated_60m_count") or 0
+    partial = row.get("partial_evaluated_count") or 0
+    pending = row.get("pending_count") or 0
+
+    if evaluated_60m < min_sample:
+        return "sample_insufficient_60m"
+    if partial or pending:
+        return "mixed_full_partial_or_pending"
+    if evaluated and evaluated == evaluated_60m:
+        return "full_60m_sample"
+    return "evaluated_60m_sample"
+
+
+def profit_label(row, min_sample):
+    evaluated = row.get("evaluated_60m_count") or 0
+    net_avg_60m = row.get("avg_net_return_60m_pct")
+    stop_hit = row.get("stop_loss_hit_rate_pct")
+
+    if evaluated < min_sample:
+        return "sample_insufficient"
+    if stop_hit is not None and stop_hit >= 60:
+        return "high_stop_risk"
+    if net_avg_60m is None:
+        return "profit_unknown"
+    if net_avg_60m > 0:
+        return "positive_net_expectancy"
+    if net_avg_60m < 0:
+        return "negative_net_expectancy"
+    return "flat_net_expectancy"
+
+
+def directional_label(row, min_sample):
+    evaluated = row.get("evaluated_60m_count") or 0
+    directional_60m = row.get("directional_success_60m_pct")
+
+    if evaluated < min_sample:
+        return "sample_insufficient"
+    if directional_60m is None:
+        return "direction_unknown"
+    if directional_60m >= 60:
+        return "direction_validated"
+    if directional_60m < 40:
+        return "direction_contra"
+    return "direction_neutral"
+
+
+def action_side(group_name):
+    if not group_name:
+        return "unknown"
+    action = str(group_name).split("/")[-1].strip()
+    if action in LONG_ACTIONS:
+        return "long_candidate"
+    if action in CAUTION_ACTIONS:
+        return "caution_or_avoid"
+    if group_name in ("long_candidate", "caution_or_avoid"):
+        return group_name
+    return "unknown"
+
+
+def interpretation_hint(row):
+    side = action_side(row.get("group_name"))
+    profit = row.get("profit_label")
+    direction = row.get("directional_label")
+
+    if side == "caution_or_avoid" and profit == "positive_net_expectancy" and direction == "direction_contra":
+        return "caution_missed_upside"
+    if side == "caution_or_avoid" and profit == "negative_net_expectancy" and direction == "direction_validated":
+        return "caution_worked"
+    if side == "long_candidate" and profit == "positive_net_expectancy" and direction == "direction_validated":
+        return "long_signal_worked"
+    if side == "long_candidate" and profit == "negative_net_expectancy":
+        return "long_signal_failed"
+    return "mixed_or_neutral"
 
 
 def quality_label(row, min_sample):
@@ -378,6 +476,7 @@ def print_text_report(report):
     print()
 
     print("[Overview]")
+    sample = report.get("sample_summary", {})
     print(
         "signals={signals}, evaluated={evaluated}, pending={pending}, partial={partial}, "
         "eval_5/10/30/60m={eval5}/{eval10}/{eval30}/{eval60}, "
@@ -402,6 +501,14 @@ def print_text_report(report):
             netwin60=overview.get("net_win_rate_60m_pct"),
             directional60=overview.get("directional_success_60m_pct"),
             stop=overview.get("stop_loss_hit_rate_pct"),
+        )
+    )
+    print(
+        "sample_label={label}, full_60m_ratio={ratio}, headline_rule={rule}"
+        .format(
+            label=sample.get("sample_label"),
+            ratio=sample.get("full_60m_ratio_pct"),
+            rule=sample.get("headline_rule"),
         )
     )
     print("first_signal:", overview.get("first_signal_at"))
@@ -460,7 +567,8 @@ def print_group_rows(rows):
             "  {name}: signals={signals}, eval={evaluated}, eval60={eval60}, partial={partial}, "
             "avg60={avg60}, net60={net60}, win60={win60}, netwin60={netwin60}, "
             "directional60={directional60}, stop={stop}, "
-            "label={label}, hint={hint}"
+            "profit={profit}, direction={direction}, sample={sample}, "
+            "interpretation={interpretation}, label={label}, hint={hint}"
             .format(
                 name=item.get("group_name"),
                 signals=item.get("signal_count"),
@@ -473,6 +581,10 @@ def print_group_rows(rows):
                 netwin60=item.get("net_win_rate_60m_pct"),
                 directional60=item.get("directional_success_60m_pct"),
                 stop=item.get("stop_loss_hit_rate_pct"),
+                profit=item.get("profit_label"),
+                direction=item.get("directional_label"),
+                sample=item.get("sample_label"),
+                interpretation=item.get("interpretation_hint"),
                 label=item.get("quality_label"),
                 hint=item.get("tuning_hint"),
             )

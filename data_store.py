@@ -28,8 +28,9 @@ class TickStore:
 
         if self.enable_sqlite:
             os.makedirs(os.path.dirname(os.path.abspath(self.db_path)), exist_ok=True)
-            self.conn = sqlite3.connect(self.db_path)
+            self.conn = sqlite3.connect(self.db_path, timeout=30)
             self.conn.row_factory = sqlite3.Row
+            self.conn.execute("PRAGMA busy_timeout=30000")
             self._create_tables()
 
     def _create_tables(self):
