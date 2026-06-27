@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 import tempfile
 import unittest
 
@@ -10,6 +11,7 @@ from kiwoom_focused_dashboard import (
     render_dashboard_html,
     save_symbols,
 )
+from market_context import load_latest_shared_toss_context
 from storage.schema import create_or_migrate_schema
 
 import sqlite3
@@ -26,6 +28,49 @@ class KiwoomFocusedDashboardTests(unittest.TestCase):
             self.assertEqual(["005930", "000660"], load_symbols(path))
         finally:
             os.unlink(path)
+
+    def test_shared_toss_context_loads_from_hub_without_toss_db(self):
+        handle = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
+        shared_db = handle.name
+        handle.close()
+        shared_root = r"C:\Users\lmhk2\Documents\New project\shared_market_context"
+        if shared_root not in sys.path:
+            sys.path.insert(0, shared_root)
+        from shared_context_store import SharedContextStore
+
+        store = SharedContextStore(db_path=shared_db)
+        try:
+            store.insert_snapshot(
+                "toss",
+                "GLOBAL",
+                None,
+                "relationship",
+                "relationship_metrics",
+                {
+                    "relationship_regime": "insufficient_evidence",
+                    "pairs": [],
+                    "interpretation_rules": [
+                        "Daily relationship rows are not intraday timing evidence.",
+                    ],
+                },
+                collected_at="2026-06-26T22:00:00+09:00",
+                sample_count=0,
+                status="partial",
+            )
+        finally:
+            store.close()
+
+        try:
+            context = load_latest_shared_toss_context(shared_db_path=shared_db)
+            self.assertEqual("ok", context["status"])
+            self.assertEqual("shared_context_db", context["source_preference"])
+            self.assertIn("relationship_metrics", context["sections"])
+            self.assertEqual(
+                "insufficient_evidence",
+                context["sections"]["relationship_metrics"][0]["payload"]["relationship_regime"],
+            )
+        finally:
+            os.unlink(shared_db)
 
     def test_snapshot_and_html_render_from_minimal_db(self):
         handle = tempfile.NamedTemporaryFile(delete=False)

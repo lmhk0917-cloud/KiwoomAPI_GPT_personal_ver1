@@ -10,6 +10,7 @@ the runtime overlay.
 import copy
 import json
 import os
+import sqlite3
 
 from config import ENABLE_MARKET_CONTEXT, MARKET_CONTEXT_PATH
 
@@ -263,20 +264,24 @@ class MarketContextStore:
         self.global_context = {}
         self.code_contexts = {}
 
-        if not self.enabled or not self.json_path or not os.path.exists(self.json_path):
+        if not self.enabled:
             return
 
-        try:
-            with open(self.json_path, "r", encoding="utf-8") as fp:
-                data = json.load(fp)
-        except Exception as exc:
-            self.global_context = {
-                "notes": ["market context load failed: {}".format(exc)]
-            }
-            return
+        if self.json_path and os.path.exists(self.json_path):
+            try:
+                with open(self.json_path, "r", encoding="utf-8") as fp:
+                    data = json.load(fp)
+            except Exception as exc:
+                self.global_context = {
+                    "notes": ["market context load failed: {}".format(exc)]
+                }
+                data = {}
 
-        self.global_context = data.get("global", {})
-        self.code_contexts = data.get("codes", {})
+            self.global_context = data.get("global", {})
+            self.code_contexts = data.get("codes", {})
+        shared_toss = load_latest_shared_toss_context()
+        if shared_toss.get("status") == "ok":
+            self.global_context["shared_toss_context"] = shared_toss
 
     def get_context(self, code):
         context = copy.deepcopy(DEFAULT_MARKET_CONTEXT)
@@ -362,3 +367,84 @@ class MarketContextStore:
                 self._deep_update(base[key], value)
             else:
                 base[key] = value
+
+
+def load_latest_shared_toss_context(shared_db_path=None, limit=12):
+    """Load Toss summaries from shared_context.db before using direct fallbacks."""
+    db_path = shared_db_path or os.environ.get(
+        "SHARED_CONTEXT_DB_PATH",
+        r"C:\Users\lmhk2\Documents\New project\shared_market_context\shared_context.db",
+    )
+    if not db_path or not os.path.exists(db_path):
+        return {
+            "status": "missing_db",
+            "db_path": db_path,
+            "sections": {},
+            "source_preference": "shared_context_db",
+        }
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        if not _has_table(conn, "shared_context_snapshots"):
+            return {
+                "status": "missing_table",
+                "db_path": db_path,
+                "sections": {},
+                "source_preference": "shared_context_db",
+            }
+        rows = conn.execute("""
+            SELECT source, market, symbol, timeframe, section, asof, collected_at,
+                   status, staleness_sec, sample_count, payload_json
+            FROM shared_context_snapshots
+            WHERE source = 'toss'
+            ORDER BY collected_at DESC, id DESC
+            LIMIT ?
+        """, (int(limit),)).fetchall()
+        sections = {}
+        latest_values = []
+        for row in rows:
+            payload = _parse_json(row["payload_json"])
+            body = payload.get("payload_json") or payload.get("payload") or payload
+            sections.setdefault(row["section"], []).append({
+                "market": row["market"],
+                "symbol": row["symbol"],
+                "timeframe": row["timeframe"],
+                "asof": row["asof"],
+                "collected_at": row["collected_at"],
+                "status": row["status"],
+                "sample_count": row["sample_count"],
+                "payload": body,
+            })
+            if row["collected_at"]:
+                latest_values.append(row["collected_at"])
+        return {
+            "status": "ok" if sections else "empty",
+            "db_path": db_path,
+            "source_preference": "shared_context_db",
+            "sections": sections,
+            "data_quality": {
+                "latest_collected_at": max(latest_values) if latest_values else None,
+                "section_count": len(sections),
+                "warning": "Toss context comes from shared_context.db; direct project DB reads should remain fallback only.",
+            },
+            "interpretation_rules": [
+                "Toss context is US-market and relationship background, not Kiwoom order evidence.",
+                "Short-term event overlays are catalyst context only, not proven correlation.",
+                "Daily relationship rows are not intraday timing evidence.",
+            ],
+        }
+    finally:
+        conn.close()
+
+
+def _has_table(conn, table):
+    return conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone() is not None
+
+
+def _parse_json(value):
+    if not value:
+        return {}
+    try:
+        return json.loads(value)
+    except (TypeError, ValueError):
+        return {}

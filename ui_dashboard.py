@@ -706,8 +706,71 @@ class Dashboard(QWidget):
             ("최근 알림", self._fetch_scalar(conn, "SELECT MAX(sent_at) FROM notification_logs")),
             ("최근 컨텍스트", self._fetch_scalar(conn, "SELECT MAX(collected_at) FROM market_context_snapshots")),
         ]
+        shared = self._shared_context_status()
+        rows.extend([
+            ("공유 허브 DB", shared.get("db_path")),
+            ("공유 허브 상태", shared.get("status")),
+            ("공유 Kiwoom 최신", shared.get("latest_kiwoom_context_time") or "none"),
+            ("공유 Toss 최신", shared.get("latest_toss_context_time") or "none"),
+            ("공유 관계 최신", shared.get("latest_relationship_context_time") or "none"),
+            ("공유 누락 섹션", ", ".join(shared.get("missing_sections") or []) or "none"),
+        ])
 
         self._fill_key_value_table(self.operations_summary_table, rows)
+
+    def _shared_context_status(self):
+        db_path = os.environ.get(
+            "SHARED_CONTEXT_DB_PATH",
+            r"C:\Users\lmhk2\Documents\New project\shared_market_context\shared_context.db",
+        )
+        status = {
+            "db_path": db_path,
+            "status": "missing",
+            "latest_kiwoom_context_time": None,
+            "latest_toss_context_time": None,
+            "latest_relationship_context_time": None,
+            "missing_sections": [],
+        }
+        if not db_path or not os.path.exists(db_path):
+            status["missing_sections"] = ["shared_context.db"]
+            return status
+        try:
+            conn = sqlite3.connect(db_path)
+            conn.row_factory = sqlite3.Row
+            try:
+                quick = conn.execute("PRAGMA quick_check").fetchone()
+                if not quick or quick[0] != "ok":
+                    status["status"] = "failed"
+                    return status
+                if not self._shared_has_table(conn, "shared_context_snapshots"):
+                    status["status"] = "missing_table"
+                    status["missing_sections"] = ["shared_context_snapshots"]
+                    return status
+                status["latest_kiwoom_context_time"] = self._shared_latest(conn, "source = 'kiwoom'")
+                status["latest_toss_context_time"] = self._shared_latest(conn, "source = 'toss'")
+                status["latest_relationship_context_time"] = self._shared_latest(conn, "section = 'relationship_metrics'")
+                for name, value in [
+                    ("kiwoom", status["latest_kiwoom_context_time"]),
+                    ("toss", status["latest_toss_context_time"]),
+                    ("relationship", status["latest_relationship_context_time"]),
+                ]:
+                    if not value:
+                        status["missing_sections"].append(name)
+                status["status"] = "ok" if not status["missing_sections"] else "partial"
+                return status
+            finally:
+                conn.close()
+        except Exception as exc:
+            status["status"] = "failed"
+            status["missing_sections"] = [str(exc)]
+            return status
+
+    def _shared_has_table(self, conn, table):
+        return conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone() is not None
+
+    def _shared_latest(self, conn, where):
+        row = conn.execute("SELECT MAX(collected_at) AS latest FROM shared_context_snapshots WHERE {}".format(where)).fetchone()
+        return row["latest"] if row else None
 
     def _refresh_gpt_usage_table(self, conn):
         try:
