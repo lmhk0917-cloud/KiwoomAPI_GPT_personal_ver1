@@ -350,7 +350,7 @@ class RealtimeStrategyApp:
         ):
             print("KIWOOM_SHARED_CONTEXT_AUTO_EXPORT_SKIPPED=cooldown")
             return False
-        ok = export_shared_context(reason=reason)
+        ok = export_shared_context(reason=reason, blocking=force)
         if ok:
             self.last_shared_context_export_at = now
         return ok
