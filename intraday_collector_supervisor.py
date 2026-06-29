@@ -16,6 +16,7 @@ from datetime import datetime
 
 from app_paths import DEFAULT_DB_PATH, setup_runtime_logging
 from preflight_check import print_preflight_report, run_preflight
+from shared_context_auto_export import export_shared_context
 
 
 TABLES = [
@@ -259,6 +260,7 @@ def main():
         time.sleep(min(args.retry_delay_sec, max(10, remaining)))
 
     print_counts("SUPERVISOR_DB_END", count_rows(DEFAULT_DB_PATH))
+    export_shared_context(reason="intraday_supervisor_finished")
     print("SUPERVISOR_FINISHED_AT={}".format(datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
     return 0
 

@@ -18,6 +18,7 @@ from config import GPT_MODEL, GPT_MAX_TOKENS, MARKET_CONTEXT_PATH
 from data_store import TickStore
 from env_loader import load_project_env
 from paper_trade_report import build_report
+from shared_context_auto_export import export_shared_context
 
 
 SYSTEM_PROMPT = (
@@ -99,6 +100,7 @@ def main():
         print("unit_warnings:")
         for warning in unit_warnings:
             print(" -", warning)
+    export_shared_context(reason="post_market_feedback_gpt")
     print()
     print(result)
 

@@ -57,6 +57,7 @@ from paper_trade_simulator import evaluate_signal as evaluate_paper_signal
 from paper_trade_simulator import fetch_pending_signals
 from quant_signal_score import build_quant_signal_score
 from settings_store import SettingsStore
+from shared_context_auto_export import export_shared_context
 from signal_generator import generate_validation_signal
 from env_loader import load_project_env
 
@@ -87,6 +88,7 @@ class RealtimeStrategyApp:
         self.last_macro_context_crawled_at = None
         self.last_news_context_checked_at = {}
         self.last_market_status_snapshot_key = None
+        self.last_shared_context_export_at = None
         self.post_market_feedback_done_date = None
         self.notifier = Notifier()
         self.market_context_store = MarketContextStore()
@@ -241,6 +243,7 @@ class RealtimeStrategyApp:
 
         if not market_summaries:
             print("No GPT trigger events yet.")
+            self._maybe_export_shared_context(reason="intraday_cycle_no_gpt")
             return
 
         print("GPT eligible symbols before rank:", len(market_summaries))
@@ -292,6 +295,8 @@ class RealtimeStrategyApp:
                 analyzed_at=finished_at.strftime("%Y-%m-%d %H:%M:%S.%f")
             )
 
+        self._maybe_export_shared_context(reason="intraday_gpt_analysis_saved")
+
         print("\n========== GPT analysis result ==========")
         print(result)
         print("=========================================\n")
@@ -320,6 +325,7 @@ class RealtimeStrategyApp:
         snapshots = self._save_quant_feedback_snapshot()
         print("POST_MARKET_PAPER_EVALUATED={}".format(evaluated))
         print("POST_MARKET_QUANT_SNAPSHOTS={}".format(snapshots))
+        self._maybe_export_shared_context(reason="post_market_feedback", force=True)
         self.post_market_feedback_done_date = date_key
 
         if self._get_setting(
@@ -333,6 +339,21 @@ class RealtimeStrategyApp:
                 print("POST_MARKET_ANALYSIS_TIMER_STOP_ERROR={}".format(exc))
 
         return True
+
+    def _maybe_export_shared_context(self, reason, force=False):
+        now = datetime.now()
+        cooldown_sec = int(os.environ.get("KIWOOM_SHARED_CONTEXT_EXPORT_COOLDOWN_SEC", "300"))
+        if (
+            not force
+            and self.last_shared_context_export_at is not None
+            and (now - self.last_shared_context_export_at).total_seconds() < cooldown_sec
+        ):
+            print("KIWOOM_SHARED_CONTEXT_AUTO_EXPORT_SKIPPED=cooldown")
+            return False
+        ok = export_shared_context(reason=reason)
+        if ok:
+            self.last_shared_context_export_at = now
+        return ok
 
     def _is_post_market_feedback_time(self, now):
         """Return True once local time has passed the configured feedback time."""
