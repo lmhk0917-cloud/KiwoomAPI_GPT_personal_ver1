@@ -90,6 +90,36 @@ class PaperTradeReportTests(unittest.TestCase):
         self.assertEqual(1, report["windows"][0]["overview"]["evaluated_60m_count"])
         self.assertIn("long_candidate", report["windows"][0])
 
+    def test_cluster_summary_groups_repeated_signals_inside_window(self):
+        for minute, return_60m in [(1, 0.5), (4, 0.7), (20, -0.3)]:
+            signal_id = self._save_signal(minute, "WATCH_SUPPORT")
+            self.store.save_paper_trade_result({
+                "signal_id": signal_id,
+                "evaluated_at": "2026-06-25 11:{:02d}:00.000000".format(minute),
+                "code": "000660",
+                "entry_time": "2026-06-25 10:{:02d}:00.000000".format(minute),
+                "entry_price": 100.0,
+                "return_5m_pct": return_60m / 4,
+                "return_10m_pct": return_60m / 3,
+                "return_30m_pct": return_60m / 2,
+                "return_60m_pct": return_60m,
+                "max_gain_30m_pct": max(return_60m, 0),
+                "max_loss_30m_pct": min(return_60m, 0),
+                "max_gain_60m_pct": max(return_60m, 0),
+                "max_loss_60m_pct": min(return_60m, 0),
+                "target_1_hit": return_60m > 0,
+                "target_2_hit": False,
+                "stop_loss_hit": return_60m < 0,
+                "outcome_label": "target_1_before_stop" if return_60m > 0 else "stop_before_target",
+            })
+
+        report = build_report(self.store.conn, min_sample=1, recent_limit=0)
+
+        self.assertEqual(3, report["overview"]["signal_count"])
+        self.assertEqual(2, report["cluster_summary"]["cluster_count"])
+        self.assertEqual(2, report["cluster_summary"]["evaluated_cluster_60m_count"])
+        self.assertEqual(50.0, report["cluster_summary"]["cluster_win_rate_60m_pct"])
+
     def test_parse_windows_deduplicates_and_validates(self):
         self.assertEqual([7, 30, 60], parse_windows("7,30,30,60"))
         with self.assertRaises(Exception):

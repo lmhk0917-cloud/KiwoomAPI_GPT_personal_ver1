@@ -22,6 +22,7 @@ ROUND_TRIP_COST_PCT = (
     + config.TRADE_SELL_TAX_PCT
     + (config.TRADE_SLIPPAGE_PCT * 2)
 )
+DEFAULT_CLUSTER_WINDOW_MINUTES = 10
 
 LONG_ACTIONS = set((
     "WATCH_REBOUND",
@@ -240,7 +241,7 @@ def _metric_block(rows):
     return_10m = _values(evaluated, "return_10m_pct")
     return_30m = _values(evaluated, "return_30m_pct")
     return_60m = _values(evaluated, "return_60m_pct")
-    return {
+    metrics = {
         "signal_count": len(rows),
         "evaluated_count": len(evaluated),
         "pending_count": len(rows) - len(evaluated),
@@ -268,6 +269,8 @@ def _metric_block(rows):
         "stop_loss_hit_rate_pct": _hit_rate(evaluated, "stop_loss_hit"),
         "outcome_counts": _counts(evaluated, "outcome_label"),
     }
+    metrics.update(_cluster_metrics(rows))
+    return metrics
 
 
 def _build_guidance(overview, by_action, min_sample=5):
@@ -401,6 +404,76 @@ def _counts(rows, key):
         value = row[key] if row[key] is not None else "unknown"
         counts[value] = counts.get(value, 0) + 1
     return counts
+
+
+def _cluster_metrics(rows, window_minutes=DEFAULT_CLUSTER_WINDOW_MINUTES):
+    clusters = _cluster_representatives(rows, window_minutes=window_minutes)
+    evaluated = [row for row in clusters if row["result_id"] is not None]
+    return_30m = _values(clusters, "return_30m_pct")
+    return_60m = _values(clusters, "return_60m_pct")
+    return {
+        "cluster_window_minutes": window_minutes,
+        "cluster_count": len(clusters),
+        "evaluated_cluster_count": len(evaluated),
+        "evaluated_cluster_30m_count": len(return_30m),
+        "evaluated_cluster_60m_count": len(return_60m),
+        "avg_cluster_return_30m_pct": _avg(return_30m),
+        "avg_cluster_return_60m_pct": _avg(return_60m),
+        "avg_cluster_net_return_60m_pct": _avg([value - ROUND_TRIP_COST_PCT for value in return_60m]),
+        "cluster_win_rate_60m_pct": _win_rate(return_60m),
+        "cluster_net_win_rate_60m_pct": _win_rate([value - ROUND_TRIP_COST_PCT for value in return_60m]),
+        "cluster_profit_factor_60m": _profit_factor(return_60m),
+        "cluster_stop_loss_hit_rate_pct": _hit_rate(evaluated, "stop_loss_hit"),
+    }
+
+
+def _cluster_representatives(rows, window_minutes=DEFAULT_CLUSTER_WINDOW_MINUTES):
+    clusters = []
+    active = {}
+    window_delta = timedelta(minutes=window_minutes)
+    sorted_rows = sorted(rows, key=lambda row: (
+        row["code"] or "",
+        row["action_hint"] or "",
+        row["detected_at"] or "",
+    ))
+
+    for row in sorted_rows:
+        detected_at = _parse_dt(row["detected_at"])
+        if not detected_at:
+            continue
+        key = (row["code"], row["action_hint"])
+        current = active.get(key)
+        if current is None or detected_at - current["started_at"] > window_delta:
+            current = {"started_at": detected_at, "rows": []}
+            active[key] = current
+            clusters.append(current)
+        current["rows"].append(row)
+
+    representatives = []
+    for cluster in clusters:
+        representative = None
+        for row in cluster["rows"]:
+            if row["return_60m_pct"] is not None:
+                representative = row
+                break
+        if representative is None:
+            for row in cluster["rows"]:
+                if row["result_id"] is not None:
+                    representative = row
+                    break
+        representatives.append(representative or cluster["rows"][0])
+    return representatives
+
+
+def _parse_dt(value):
+    if not value:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(value, fmt)
+        except ValueError:
+            pass
+    return None
 
 
 if __name__ == "__main__":

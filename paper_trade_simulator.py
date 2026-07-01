@@ -9,11 +9,20 @@ from bisect import bisect_left, bisect_right
 from datetime import datetime, timedelta
 
 from app_paths import DEFAULT_DB_PATH
+import config
 from data_store import TickStore
 
 
 HORIZONS_MIN = [5, 10, 30, 60]
 COMPLETION_GRACE_MINUTES = 5
+ENTRY_MODES = ("signal_price", "next_tick", "next_1m_open")
+DEFAULT_ENTRY_MODE = "next_tick"
+ROUND_TRIP_COST_PCT = (
+    config.TRADE_BUY_FEE_PCT
+    + config.TRADE_SELL_FEE_PCT
+    + config.TRADE_SELL_TAX_PCT
+    + (config.TRADE_SLIPPAGE_PCT * 2)
+)
 TRADEABLE_LONG_ACTIONS = (
     "WATCH_REBOUND",
     "WATCH_PULLBACK",
@@ -44,6 +53,12 @@ def main():
     parser.add_argument("--code", help="Optional stock code filter")
     parser.add_argument("--since", help="Only evaluate signals detected at or after this timestamp")
     parser.add_argument(
+        "--entry-mode",
+        choices=ENTRY_MODES,
+        default=DEFAULT_ENTRY_MODE,
+        help="Execution price assumption for paper validation.",
+    )
+    parser.add_argument(
         "--allow-partial",
         action="store_true",
         help="Save evaluations when at least one horizon is complete. Use after market close.",
@@ -61,6 +76,7 @@ def main():
             signal,
             allow_partial=args.allow_partial,
             tick_cache=tick_cache,
+            entry_mode=args.entry_mode,
         )
         if result:
             store.save_paper_trade_result(result)
@@ -106,20 +122,33 @@ def fetch_pending_signals(store, limit=100, code=None, since=None):
     return store.conn.execute(sql, params).fetchall()
 
 
-def evaluate_signal(store, signal, allow_partial=False, tick_cache=None):
+def evaluate_signal(store, signal, allow_partial=False, tick_cache=None, entry_mode=DEFAULT_ENTRY_MODE):
     """Evaluate future returns after one signal when enough tick data exists."""
-    entry_time = parse_dt(signal["detected_at"])
-    entry_price = _to_float(signal["current_price"])
+    signal_time = parse_dt(signal["detected_at"])
+    signal_price = _to_float(signal["current_price"])
 
-    if not entry_time or not entry_price:
+    if not signal_time or not signal_price:
         return None
 
-    end_time = entry_time + timedelta(minutes=max(HORIZONS_MIN))
+    end_time = signal_time + timedelta(minutes=max(HORIZONS_MIN))
     fetch_end_time = end_time + timedelta(minutes=COMPLETION_GRACE_MINUTES)
     if tick_cache is not None:
-        future_ticks = tick_cache.future_ticks(signal["code"], entry_time, fetch_end_time)
+        future_ticks = tick_cache.future_ticks(signal["code"], signal_time, fetch_end_time)
     else:
-        future_ticks = fetch_future_ticks(store, signal["code"], entry_time, fetch_end_time)
+        future_ticks = fetch_future_ticks(store, signal["code"], signal_time, fetch_end_time)
+
+    execution = resolve_entry_execution(
+        future_ticks=future_ticks,
+        signal_time=signal_time,
+        signal_price=signal_price,
+        entry_mode=entry_mode,
+    )
+    if not execution:
+        return None
+
+    entry_time = execution["entry_time"]
+    entry_price = execution["entry_price"]
+
     last_tick_time = _tick_dt(future_ticks[-1]) if future_ticks else None
     if not last_tick_time:
         return None
@@ -151,8 +180,19 @@ def evaluate_signal(store, signal, allow_partial=False, tick_cache=None):
         "signal_id": signal["id"],
         "evaluated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f"),
         "code": signal["code"],
-        "entry_time": signal["detected_at"],
+        "entry_time": format_dt(entry_time),
         "entry_price": entry_price,
+        "signal_detected_at": signal["detected_at"],
+        "signal_price": signal_price,
+        "entry_price_mode": execution["entry_price_mode"],
+        "execution_time": format_dt(entry_time),
+        "raw_execution_price": execution["raw_execution_price"],
+        "assumed_buy_slippage_pct": config.TRADE_SLIPPAGE_PCT,
+        "assumed_sell_slippage_pct": config.TRADE_SLIPPAGE_PCT,
+        "buy_fee_pct": config.TRADE_BUY_FEE_PCT,
+        "sell_fee_pct": config.TRADE_SELL_FEE_PCT,
+        "sell_tax_pct": config.TRADE_SELL_TAX_PCT,
+        "round_trip_cost_pct": ROUND_TRIP_COST_PCT,
         "evaluation_minutes": evaluation_minutes,
         "completed_horizons_min": completed_horizons,
         "partial_evaluation": evaluation_minutes < max(HORIZONS_MIN),
@@ -169,9 +209,17 @@ def evaluate_signal(store, signal, allow_partial=False, tick_cache=None):
                 future_ticks,
                 entry_time + timedelta(minutes=minutes),
             )
-            result[key] = pct_from_entry(horizon_price, entry_price)
+            gross_return = pct_from_entry(horizon_price, entry_price)
+            result[key] = gross_return
+            result["gross_return_{}m_pct".format(minutes)] = gross_return
+            result["net_return_{}m_pct".format(minutes)] = net_pct_from_entry(
+                horizon_price,
+                entry_price,
+            )
         else:
             result[key] = None
+            result["gross_return_{}m_pct".format(minutes)] = None
+            result["net_return_{}m_pct".format(minutes)] = None
 
     target_1 = _to_float(signal["target_1"]) if "target_1" in signal.keys() else None
     target_2 = _to_float(signal["target_2"]) if "target_2" in signal.keys() else None
@@ -201,6 +249,60 @@ def evaluate_signal(store, signal, allow_partial=False, tick_cache=None):
     )
 
     return result
+
+
+def resolve_entry_execution(future_ticks, signal_time, signal_price, entry_mode=DEFAULT_ENTRY_MODE):
+    """Resolve executable paper-entry price and time for a signal."""
+    if entry_mode not in ENTRY_MODES:
+        raise ValueError("Unsupported entry_mode: {}".format(entry_mode))
+
+    if entry_mode == "signal_price":
+        return {
+            "entry_time": signal_time,
+            "entry_price": signal_price,
+            "raw_execution_price": signal_price,
+            "entry_price_mode": entry_mode,
+        }
+
+    if entry_mode == "next_tick":
+        tick = first_tick_after(future_ticks, signal_time)
+    else:
+        tick = first_tick_at_or_after(future_ticks, next_minute_open(signal_time))
+
+    if not tick:
+        return None
+
+    price = _to_float(tick["price"])
+    tick_time = _tick_dt(tick)
+    if price is None or tick_time is None:
+        return None
+
+    return {
+        "entry_time": tick_time,
+        "entry_price": price,
+        "raw_execution_price": price,
+        "entry_price_mode": entry_mode,
+    }
+
+
+def first_tick_after(ticks, target_time):
+    for row in ticks:
+        received_at = _tick_dt(row)
+        if received_at and received_at > target_time:
+            return row
+    return None
+
+
+def first_tick_at_or_after(ticks, target_time):
+    for row in ticks:
+        received_at = _tick_dt(row)
+        if received_at and received_at >= target_time:
+            return row
+    return None
+
+
+def next_minute_open(value):
+    return (value.replace(second=0, microsecond=0) + timedelta(minutes=1))
 
 
 def fetch_last_tick_time(store, code, start_time, end_time):
@@ -316,6 +418,21 @@ def pct_from_entry(price, entry_price):
     if price is None or entry_price in (None, 0):
         return None
     return round((price - entry_price) / entry_price * 100, 3)
+
+
+def net_pct_from_entry(exit_price, entry_price):
+    if exit_price is None or entry_price in (None, 0):
+        return None
+    buy_price = entry_price * (1 + config.TRADE_SLIPPAGE_PCT / 100)
+    sell_price = exit_price * (1 - config.TRADE_SLIPPAGE_PCT / 100)
+    gross_after_slippage = (sell_price - buy_price) / buy_price * 100
+    return round(
+        gross_after_slippage
+        - config.TRADE_BUY_FEE_PCT
+        - config.TRADE_SELL_FEE_PCT
+        - config.TRADE_SELL_TAX_PCT,
+        3,
+    )
 
 
 def classify_decision_side(action_hint):

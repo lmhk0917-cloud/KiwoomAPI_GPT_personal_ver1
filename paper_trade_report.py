@@ -20,6 +20,7 @@ ROUND_TRIP_COST_PCT = (
     + config.TRADE_SELL_TAX_PCT
     + (config.TRADE_SLIPPAGE_PCT * 2)
 )
+DEFAULT_CLUSTER_WINDOW_MINUTES = 10
 
 LONG_ACTIONS = (
     "WATCH_REBOUND",
@@ -203,6 +204,10 @@ def build_report(conn, code=None, days=None, min_sample=5, recent_limit=10):
     code_action_rows = fetch_group_rows(conn, "s.code || ' / ' || s.action_hint", where_sql, params)
     outcome_rows = fetch_outcomes(conn, where_sql, params)
     recent_rows = fetch_recent(conn, where_sql, params, limit=recent_limit)
+    cluster_rows = build_cluster_rows(
+        fetch_cluster_source_rows(conn, where_sql, params),
+        window_minutes=DEFAULT_CLUSTER_WINDOW_MINUTES,
+    )
 
     return {
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f"),
@@ -217,6 +222,8 @@ def build_report(conn, code=None, days=None, min_sample=5, recent_limit=10):
         "by_decision_side": annotate_rows(decision_side_rows, min_sample=min_sample),
         "by_code": annotate_rows(code_rows, min_sample=min_sample),
         "by_code_action": annotate_rows(code_action_rows, min_sample=min_sample),
+        "cluster_summary": cluster_metric_block(cluster_rows),
+        "cluster_by_action": cluster_group_blocks(cluster_rows, "action_hint"),
         "outcomes": [row_to_dict(row) for row in outcome_rows],
         "recent_evaluated": [row_to_dict(row) for row in recent_rows],
     }
@@ -388,6 +395,117 @@ def fetch_recent(conn, where_sql, params, limit):
         LIMIT ?
     """.format(where_sql=where_sql)
     return conn.execute(sql, params + [limit]).fetchall()
+
+
+def fetch_cluster_source_rows(conn, where_sql, params):
+    sql = """
+        SELECT
+            s.id AS signal_id,
+            s.detected_at,
+            s.code,
+            s.action_hint,
+            r.id AS result_id,
+            r.return_30m_pct,
+            r.return_60m_pct,
+            r.stop_loss_hit
+        FROM signal_logs s
+        LEFT JOIN paper_trade_results r
+            ON r.signal_id = s.id
+        {where_sql}
+        ORDER BY s.code ASC, s.action_hint ASC, s.detected_at ASC
+    """.format(where_sql=where_sql)
+    return conn.execute(sql, params).fetchall()
+
+
+def build_cluster_rows(rows, window_minutes=DEFAULT_CLUSTER_WINDOW_MINUTES):
+    """Derive representative signal clusters without changing the DB schema."""
+    clusters = []
+    active = {}
+    window_delta = timedelta(minutes=window_minutes)
+
+    for row in rows:
+        item = row_to_dict(row)
+        detected_at = parse_dt(item.get("detected_at"))
+        if not detected_at:
+            continue
+        key = (item.get("code"), item.get("action_hint"))
+        current = active.get(key)
+        if current is None or detected_at - current["cluster_started_at_dt"] > window_delta:
+            current = {
+                "cluster_id": "{}|{}|{}".format(
+                    item.get("code"),
+                    item.get("action_hint"),
+                    item.get("detected_at"),
+                ),
+                "cluster_started_at": item.get("detected_at"),
+                "cluster_started_at_dt": detected_at,
+                "code": item.get("code"),
+                "action_hint": item.get("action_hint"),
+                "signals": [],
+            }
+            active[key] = current
+            clusters.append(current)
+        current["signals"].append(item)
+
+    representative_rows = []
+    for cluster in clusters:
+        representative = first_evaluated_signal(cluster["signals"]) or cluster["signals"][0]
+        representative_rows.append({
+            "cluster_id": cluster["cluster_id"],
+            "cluster_started_at": cluster["cluster_started_at"],
+            "code": cluster["code"],
+            "action_hint": cluster["action_hint"],
+            "signal_count": len(cluster["signals"]),
+            "result_id": representative.get("result_id"),
+            "return_30m_pct": representative.get("return_30m_pct"),
+            "return_60m_pct": representative.get("return_60m_pct"),
+            "stop_loss_hit": representative.get("stop_loss_hit"),
+        })
+    return representative_rows
+
+
+def first_evaluated_signal(rows):
+    for row in rows:
+        if row.get("return_60m_pct") is not None:
+            return row
+    for row in rows:
+        if row.get("result_id") is not None:
+            return row
+    return None
+
+
+def cluster_group_blocks(cluster_rows, key):
+    groups = {}
+    for row in cluster_rows:
+        groups.setdefault(row.get(key) or "UNKNOWN", []).append(row)
+    rows = []
+    for group_name, group_rows in sorted(groups.items()):
+        block = cluster_metric_block(group_rows)
+        block["group_name"] = group_name
+        rows.append(block)
+    rows.sort(key=lambda item: (item.get("evaluated_cluster_count") or 0), reverse=True)
+    return rows
+
+
+def cluster_metric_block(cluster_rows):
+    return_30m = [float(row["return_30m_pct"]) for row in cluster_rows if row.get("return_30m_pct") is not None]
+    return_60m = [float(row["return_60m_pct"]) for row in cluster_rows if row.get("return_60m_pct") is not None]
+    evaluated = [row for row in cluster_rows if row.get("result_id") is not None]
+    return {
+        "cluster_window_minutes": DEFAULT_CLUSTER_WINDOW_MINUTES,
+        "cluster_count": len(cluster_rows),
+        "evaluated_cluster_count": len(evaluated),
+        "evaluated_cluster_60m_count": len(return_60m),
+        "avg_cluster_return_30m_pct": average(return_30m),
+        "avg_cluster_return_60m_pct": average(return_60m),
+        "avg_cluster_net_return_60m_pct": average([value - ROUND_TRIP_COST_PCT for value in return_60m]),
+        "cluster_win_rate_60m_pct": win_rate(return_60m),
+        "cluster_net_win_rate_60m_pct": win_rate([value - ROUND_TRIP_COST_PCT for value in return_60m]),
+        "cluster_profit_factor_60m": profit_factor(return_60m),
+        "cluster_stop_loss_hit_rate_pct": rate(
+            [row.get("stop_loss_hit") for row in evaluated if row.get("stop_loss_hit") is not None]
+        ),
+    }
 
 
 def rate_sql(true_condition, denominator_condition):
@@ -588,6 +706,45 @@ def row_to_dict(row):
     return {key: row[key] for key in row.keys()}
 
 
+def parse_dt(value):
+    if not value:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(value, fmt)
+        except ValueError:
+            pass
+    return None
+
+
+def average(values):
+    if not values:
+        return None
+    return round(sum(values) / len(values), 3)
+
+
+def win_rate(values):
+    if not values:
+        return None
+    return round(len([value for value in values if value > 0]) / len(values) * 100, 2)
+
+
+def profit_factor(values):
+    if not values:
+        return None
+    gains = sum(value for value in values if value > 0)
+    losses = abs(sum(value for value in values if value < 0))
+    if losses == 0:
+        return 999.0 if gains > 0 else None
+    return round(gains / losses, 4)
+
+
+def rate(values):
+    if not values:
+        return None
+    return round(len([value for value in values if int(value) == 1]) / len(values) * 100, 2)
+
+
 def print_text_report(report):
     overview = report["overview"]
     filters = report["filters"]
@@ -635,6 +792,27 @@ def print_text_report(report):
     )
     print("first_signal:", overview.get("first_signal_at"))
     print("latest_signal:", overview.get("latest_signal_at"))
+    print()
+
+    cluster = report.get("cluster_summary") or {}
+    print("[Cluster Summary]")
+    print(
+        "window={window}m, clusters={clusters}, evaluated_clusters={evaluated}, "
+        "eval60={eval60}, avg60={avg60}, net60={net60}, win60={win60}, "
+        "netwin60={netwin60}, pf60={pf60}, stop={stop}"
+        .format(
+            window=cluster.get("cluster_window_minutes"),
+            clusters=cluster.get("cluster_count"),
+            evaluated=cluster.get("evaluated_cluster_count"),
+            eval60=cluster.get("evaluated_cluster_60m_count"),
+            avg60=cluster.get("avg_cluster_return_60m_pct"),
+            net60=cluster.get("avg_cluster_net_return_60m_pct"),
+            win60=cluster.get("cluster_win_rate_60m_pct"),
+            netwin60=cluster.get("cluster_net_win_rate_60m_pct"),
+            pf60=cluster.get("cluster_profit_factor_60m"),
+            stop=cluster.get("cluster_stop_loss_hit_rate_pct"),
+        )
+    )
     print()
 
     print("[By Action]")

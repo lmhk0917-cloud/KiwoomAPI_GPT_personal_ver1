@@ -127,6 +127,41 @@ class QuantFeedbackTests(unittest.TestCase):
         self.assertEqual("AVOID_DOWNTREND", guidance["missed_upside_actions"][0]["action_hint"])
         self.assertIn("missed upside", guidance["summary"])
 
+    def test_feedback_snapshot_includes_cluster_metrics(self):
+        for minute, return_60m in [(1, 0.8), (4, 0.6), (20, -0.4)]:
+            signal_id = self._save_signal(minute, action_hint="WATCH_SUPPORT")
+            self.store.save_paper_trade_result({
+                "signal_id": signal_id,
+                "evaluated_at": "2026-06-22 11:{:02d}:00.000000".format(minute),
+                "code": "005930",
+                "entry_time": "2026-06-22 10:{:02d}:00.000000".format(minute),
+                "entry_price": 100.0,
+                "return_5m_pct": return_60m / 4,
+                "return_10m_pct": return_60m / 3,
+                "return_30m_pct": return_60m / 2,
+                "return_60m_pct": return_60m,
+                "max_gain_30m_pct": max(return_60m, 0),
+                "max_loss_30m_pct": min(return_60m, 0),
+                "max_gain_60m_pct": max(return_60m, 0),
+                "max_loss_60m_pct": min(return_60m, 0),
+                "target_1_hit": return_60m > 0,
+                "target_2_hit": False,
+                "stop_loss_hit": return_60m < 0,
+                "outcome_label": "target_1_before_stop" if return_60m > 0 else "stop_before_target",
+            })
+
+        snapshot = build_feedback_snapshot(
+            conn=self.store.conn,
+            days=30,
+            min_sample=1,
+            code="005930",
+        )
+
+        self.assertEqual(3, snapshot["overview"]["signal_count"])
+        self.assertEqual(2, snapshot["overview"]["cluster_count"])
+        self.assertEqual(2, snapshot["overview"]["evaluated_cluster_60m_count"])
+        self.assertEqual(50.0, snapshot["overview"]["cluster_win_rate_60m_pct"])
+
     def _save_signal(self, index, action_hint="WATCH_SUPPORT"):
         return self.store.save_signal_log(
             signal={
