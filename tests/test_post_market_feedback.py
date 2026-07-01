@@ -12,7 +12,9 @@ from main import RealtimeStrategyApp
 from post_market_feedback_gpt import (
     build_authoritative_metrics,
     build_prompt,
+    build_validation_notes,
     numeric_conventions,
+    validate_result_interpretation,
     validate_result_units,
 )
 
@@ -40,6 +42,9 @@ class PostMarketFeedbackTests(unittest.TestCase):
         self.assertIn("0.185 means 0.185%, not 18.5%", prompt)
         self.assertIn("Never multiply *_pct values by 100", prompt)
         self.assertIn('"do_not_rescale_pct_values":true', prompt)
+        self.assertIn("Output in Korean", prompt)
+        self.assertIn("caution_missed_upside", prompt)
+        self.assertIn("validation_notes.missed_upside_actions", prompt)
 
     def test_post_market_gpt_result_unit_warning_detects_rescaled_returns(self):
         payload = {
@@ -63,6 +68,19 @@ class PostMarketFeedbackTests(unittest.TestCase):
         self.assertTrue(any("avg_return_60m_pct=0.185" in item for item in warnings))
         self.assertTrue(any("avg_return_60m_pct=0.924" in item for item in warnings))
         self.assertFalse(any("win_rate_60m_pct" in item for item in warnings))
+
+    def test_post_market_gpt_unit_warning_ignores_embedded_number_fragments(self):
+        payload = {
+            "paper_trade_report": {
+                "by_code_action": [
+                    {"group_name": "005930", "avg_return_10m_pct": 0.09},
+                ],
+            }
+        }
+
+        warnings = validate_result_units("Samsung was 0.509% over 60 minutes.", payload)
+
+        self.assertEqual([], warnings)
 
     def test_post_market_gpt_authoritative_metrics_preserve_validation_labels(self):
         metrics = build_authoritative_metrics({
@@ -88,6 +106,49 @@ class PostMarketFeedbackTests(unittest.TestCase):
         self.assertEqual(0.185, metrics["overview"]["avg_return_60m_pct"])
         self.assertEqual("mixed_full_partial_or_pending", metrics["sample_summary"]["sample_label"])
         self.assertEqual("caution_missed_upside", metrics["by_action"][0]["interpretation_hint"])
+        self.assertEqual("AVOID_DOWNTREND", metrics["validation_notes"]["missed_upside_actions"][0]["group_name"])
+
+    def test_validation_notes_separate_missed_upside_from_worked_caution(self):
+        notes = build_validation_notes({
+            "by_action": [
+                {
+                    "group_name": "AVOID_VOLATILITY_TRAP",
+                    "interpretation_hint": "caution_missed_upside",
+                    "directional_label": "direction_contra",
+                    "avg_net_return_60m_pct": 0.381,
+                },
+                {
+                    "group_name": "WATCH_RESISTANCE",
+                    "interpretation_hint": "caution_worked",
+                    "directional_label": "direction_validated",
+                    "avg_net_return_60m_pct": -1.943,
+                },
+            ],
+        })
+
+        self.assertEqual("AVOID_VOLATILITY_TRAP", notes["missed_upside_actions"][0]["group_name"])
+        self.assertEqual("WATCH_RESISTANCE", notes["worked_caution_actions"][0]["group_name"])
+
+    def test_interpretation_warning_detects_missed_upside_contradiction(self):
+        payload = {
+            "authoritative_metrics": {
+                "validation_notes": {
+                    "missed_upside_actions": [
+                        {"group_name": "AVOID_VOLATILITY_TRAP"},
+                    ],
+                },
+            },
+        }
+        result = "\n".join([
+            "- 잘 맞은 신호: AVOID_VOLATILITY_TRAP",
+            "- 과도하게 회피한 신호: AVOID_VOLATILITY_TRAP",
+        ])
+
+        warnings = validate_result_interpretation(result, payload)
+
+        self.assertEqual([
+            "missed-upside action listed as well-matched: AVOID_VOLATILITY_TRAP",
+        ], warnings)
 
     def test_post_market_feedback_runs_once_and_stops_timer(self):
         app = RealtimeStrategyApp.__new__(RealtimeStrategyApp)

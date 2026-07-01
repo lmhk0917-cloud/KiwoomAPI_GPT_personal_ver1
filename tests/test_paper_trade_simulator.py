@@ -10,7 +10,12 @@ if PROJECT_DIR not in sys.path:
     sys.path.insert(0, PROJECT_DIR)
 
 from data_store import TickStore
-from paper_trade_simulator import TickWindowCache, evaluate_signal, fetch_pending_signals
+from paper_trade_simulator import (
+    TickWindowCache,
+    classify_decision_side,
+    evaluate_signal,
+    fetch_pending_signals,
+)
 
 
 class PaperTradeSimulatorTests(unittest.TestCase):
@@ -74,6 +79,36 @@ class PaperTradeSimulatorTests(unittest.TestCase):
         self.assertEqual(direct["return_5m_pct"], cached["return_5m_pct"])
         self.assertEqual(direct["return_60m_pct"], cached["return_60m_pct"])
         self.assertEqual(direct["outcome_label"], cached["outcome_label"])
+
+    def test_fetch_pending_includes_high_volatility_actions(self):
+        expected = {
+            "VOL_EXPANSION_MOMENTUM": "long_candidate",
+            "HIGH_VOL_REVERSAL_WATCH": "long_candidate",
+            "AVOID_VOLATILITY_TRAP": "avoid_or_caution",
+        }
+
+        for index, action_hint in enumerate(expected, start=1):
+            self.store.save_signal_log(
+                signal={
+                    "action_hint": action_hint,
+                    "confidence_score": 70,
+                    "risk_level": "high",
+                    "current_price": 100.0,
+                    "stop_loss": 98.0,
+                    "target_1": 101.0,
+                    "target_2": 102.0,
+                    "reasons": ["test"],
+                },
+                summary={"code": "005930", "name": "Samsung", "timeframes": {}},
+                detected_at="2026-06-24 09:{:02d}:00.000000".format(index),
+            )
+
+        rows = fetch_pending_signals(self.store, limit=10)
+        actions = {row["action_hint"] for row in rows}
+
+        self.assertTrue(set(expected).issubset(actions))
+        for action_hint, side in expected.items():
+            self.assertEqual(side, classify_decision_side(action_hint))
 
 
 if __name__ == "__main__":

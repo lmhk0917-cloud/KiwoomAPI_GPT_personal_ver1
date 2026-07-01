@@ -27,6 +27,8 @@ LONG_ACTIONS = (
     "WATCH_BREAKOUT",
     "WATCH_SUPPORT",
     "WATCH_MOMENTUM",
+    "VOL_EXPANSION_MOMENTUM",
+    "HIGH_VOL_REVERSAL_WATCH",
 )
 
 CAUTION_ACTIONS = (
@@ -35,6 +37,7 @@ CAUTION_ACTIONS = (
     "AVOID_SUPPLY",
     "WATCH_RESISTANCE",
     "OBSERVE_EVENT",
+    "AVOID_VOLATILITY_TRAP",
 )
 
 
@@ -43,18 +46,28 @@ def main():
     store = TickStore(db_path=args.db)
 
     try:
-        report = build_report(
-            conn=store.conn,
-            code=args.code,
-            days=args.days,
-            min_sample=args.min_sample,
-            recent_limit=args.recent_limit,
-        )
+        if args.windows:
+            report = build_window_comparison(
+                conn=store.conn,
+                windows=parse_windows(args.windows),
+                code=args.code,
+                min_sample=args.min_sample,
+            )
+        else:
+            report = build_report(
+                conn=store.conn,
+                code=args.code,
+                days=args.days,
+                min_sample=args.min_sample,
+                recent_limit=args.recent_limit,
+            )
     finally:
         store.close()
 
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
+    elif args.windows:
+        print_window_comparison(report)
     else:
         print_text_report(report)
 
@@ -66,8 +79,118 @@ def parse_args():
     parser.add_argument("--days", type=int, help="Only include signals from the latest N days")
     parser.add_argument("--min-sample", type=int, default=5, help="Minimum evaluated rows before a label is trusted")
     parser.add_argument("--recent-limit", type=int, default=10, help="Recent evaluated signals to print")
+    parser.add_argument("--windows", help="Comma-separated day windows to compare, for example 7,30,60")
     parser.add_argument("--json", action="store_true", help="Print JSON instead of text")
     return parser.parse_args()
+
+
+def parse_windows(value):
+    windows = []
+    for item in str(value).split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            days = int(item)
+        except ValueError:
+            raise argparse.ArgumentTypeError("windows must be comma-separated integers")
+        if days <= 0:
+            raise argparse.ArgumentTypeError("windows must be positive day counts")
+        if days not in windows:
+            windows.append(days)
+    if not windows:
+        raise argparse.ArgumentTypeError("at least one window is required")
+    return windows
+
+
+def build_window_comparison(conn, windows, code=None, min_sample=5):
+    reports = []
+    for days in windows:
+        report = build_report(
+            conn=conn,
+            code=code,
+            days=days,
+            min_sample=min_sample,
+            recent_limit=0,
+        )
+        reports.append(compact_window_report(report))
+    return {
+        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f"),
+        "filters": {
+            "code": code,
+            "windows": windows,
+            "min_sample": min_sample,
+        },
+        "windows": reports,
+    }
+
+
+def compact_window_report(report):
+    overview = report.get("overview") or {}
+    decision_rows = {
+        row.get("group_name"): row
+        for row in report.get("by_decision_side") or []
+    }
+    action_rows = report.get("by_action") or []
+    code_action_rows = report.get("by_code_action") or []
+    return {
+        "days": (report.get("filters") or {}).get("days"),
+        "sample_summary": report.get("sample_summary") or {},
+        "overview": {
+            "signal_count": overview.get("signal_count"),
+            "evaluated_count": overview.get("evaluated_count"),
+            "evaluated_60m_count": overview.get("evaluated_60m_count"),
+            "pending_count": overview.get("pending_count"),
+            "avg_net_return_60m_pct": overview.get("avg_net_return_60m_pct"),
+            "net_win_rate_60m_pct": overview.get("net_win_rate_60m_pct"),
+            "directional_success_60m_pct": overview.get("directional_success_60m_pct"),
+            "stop_loss_hit_rate_pct": overview.get("stop_loss_hit_rate_pct"),
+        },
+        "long_candidate": compact_group_row(decision_rows.get("long_candidate")),
+        "caution_or_avoid": compact_group_row(decision_rows.get("caution_or_avoid")),
+        "best_actions": [
+            compact_group_row(row)
+            for row in sorted(
+                action_rows,
+                key=lambda row: (
+                    row.get("profit_label") == "positive_net_expectancy",
+                    row.get("avg_net_return_60m_pct") or -999,
+                    row.get("evaluated_60m_count") or 0,
+                ),
+                reverse=True,
+            )[:5]
+        ],
+        "weakest_code_actions": [
+            compact_group_row(row)
+            for row in sorted(
+                code_action_rows,
+                key=lambda row: (
+                    row.get("avg_net_return_60m_pct")
+                    if row.get("avg_net_return_60m_pct") is not None
+                    else 999
+                ),
+            )[:5]
+        ],
+    }
+
+
+def compact_group_row(row):
+    if not row:
+        return {}
+    return {
+        "group_name": row.get("group_name"),
+        "signal_count": row.get("signal_count"),
+        "evaluated_60m_count": row.get("evaluated_60m_count"),
+        "avg_net_return_60m_pct": row.get("avg_net_return_60m_pct"),
+        "net_win_rate_60m_pct": row.get("net_win_rate_60m_pct"),
+        "directional_success_60m_pct": row.get("directional_success_60m_pct"),
+        "stop_loss_hit_rate_pct": row.get("stop_loss_hit_rate_pct"),
+        "profit_label": row.get("profit_label"),
+        "directional_label": row.get("directional_label"),
+        "interpretation_hint": row.get("interpretation_hint"),
+        "quality_label": row.get("quality_label"),
+        "tuning_hint": row.get("tuning_hint"),
+    }
 
 
 def build_report(conn, code=None, days=None, min_sample=5, recent_limit=10):
@@ -422,42 +545,41 @@ def interpretation_hint(row):
 def quality_label(row, min_sample):
     evaluated = row.get("evaluated_60m_count") or 0
     directional_60m = row.get("directional_success_60m_pct")
-    avg_60m = row.get("avg_return_60m_pct")
     net_avg_60m = row.get("avg_net_return_60m_pct")
     stop_hit = row.get("stop_loss_hit_rate_pct")
 
     if evaluated < min_sample:
-        return "표본부족"
+        return "sample_insufficient"
 
     if directional_60m is not None and directional_60m >= 60:
-        return "판단우수"
+        return "direction_validated"
 
     if directional_60m is not None and directional_60m < 40:
-        return "판단하향검토"
+        return "direction_degraded"
 
     if net_avg_60m is not None and net_avg_60m > 0 and (stop_hit is None or stop_hit <= 45):
-        return "수익우수"
+        return "profit_validated"
 
     if net_avg_60m is not None and net_avg_60m < 0:
-        return "수익하향검토"
+        return "profit_degraded"
 
     if stop_hit is not None and stop_hit >= 60:
-        return "손절위험"
+        return "stop_risk"
 
-    return "중립"
+    return "neutral"
 
 
 def tuning_hint(row):
     label = row.get("quality_label")
-    if label in ("판단우수", "수익우수"):
-        return "유사 조건에서 신뢰도 상향 후보"
-    if label in ("판단하향검토", "수익하향검토"):
-        return "임계값 강화 또는 추가 확인 필요"
-    if label == "손절위험":
-        return "손절/목표가 산식 또는 진입 조건 재검토"
-    if label == "표본부족":
-        return "추가 장중 데이터 필요"
-    return "현상 유지 후 표본 추가"
+    if label in ("direction_validated", "profit_validated"):
+        return "raise_confidence_only_when_live_setup_matches"
+    if label in ("direction_degraded", "profit_degraded"):
+        return "tighten_threshold_or_require_extra_confirmation"
+    if label == "stop_risk":
+        return "recheck_stop_target_or_entry_condition"
+    if label == "sample_insufficient":
+        return "collect_more_intraday_samples"
+    return "keep_current_threshold_and_collect_more_samples"
 
 
 def row_to_dict(row):
@@ -555,6 +677,74 @@ def print_text_report(report):
                 outcome=item.get("outcome_label"),
             )
         )
+
+
+def print_window_comparison(report):
+    print("========== Paper Trade Window Comparison ==========")
+    print("generated_at:", report.get("generated_at"))
+    print("filters:", report.get("filters"))
+    print()
+
+    for item in report.get("windows") or []:
+        overview = item.get("overview") or {}
+        sample = item.get("sample_summary") or {}
+        long_row = item.get("long_candidate") or {}
+        caution_row = item.get("caution_or_avoid") or {}
+        print("[{} days]".format(item.get("days")))
+        print(
+            "signals={signals}, eval60={eval60}, pending={pending}, "
+            "net60={net60}, netwin60={netwin}, directional60={directional}, "
+            "stop={stop}, full60={full60}"
+            .format(
+                signals=overview.get("signal_count"),
+                eval60=overview.get("evaluated_60m_count"),
+                pending=overview.get("pending_count"),
+                net60=overview.get("avg_net_return_60m_pct"),
+                netwin=overview.get("net_win_rate_60m_pct"),
+                directional=overview.get("directional_success_60m_pct"),
+                stop=overview.get("stop_loss_hit_rate_pct"),
+                full60=sample.get("full_60m_ratio_pct"),
+            )
+        )
+        print(
+            "  long: eval60={eval60}, net60={net60}, directional={directional}, label={label}, hint={hint}"
+            .format(
+                eval60=long_row.get("evaluated_60m_count"),
+                net60=long_row.get("avg_net_return_60m_pct"),
+                directional=long_row.get("directional_success_60m_pct"),
+                label=long_row.get("quality_label"),
+                hint=long_row.get("tuning_hint"),
+            )
+        )
+        print(
+            "  caution: eval60={eval60}, net60={net60}, directional={directional}, label={label}, hint={hint}"
+            .format(
+                eval60=caution_row.get("evaluated_60m_count"),
+                net60=caution_row.get("avg_net_return_60m_pct"),
+                directional=caution_row.get("directional_success_60m_pct"),
+                label=caution_row.get("quality_label"),
+                hint=caution_row.get("tuning_hint"),
+            )
+        )
+        print("  best_actions:")
+        for row in item.get("best_actions") or []:
+            print("    {name}: eval60={eval60}, net60={net60}, direction={direction}, quality={quality}".format(
+                name=row.get("group_name"),
+                eval60=row.get("evaluated_60m_count"),
+                net60=row.get("avg_net_return_60m_pct"),
+                direction=row.get("directional_success_60m_pct"),
+                quality=row.get("quality_label"),
+            ))
+        print("  weakest_code_actions:")
+        for row in item.get("weakest_code_actions") or []:
+            print("    {name}: eval60={eval60}, net60={net60}, direction={direction}, quality={quality}".format(
+                name=row.get("group_name"),
+                eval60=row.get("evaluated_60m_count"),
+                net60=row.get("avg_net_return_60m_pct"),
+                direction=row.get("directional_success_60m_pct"),
+                quality=row.get("quality_label"),
+            ))
+        print()
 
 
 def print_group_rows(rows):

@@ -24,6 +24,9 @@ class KiwoomClient:
         self.market_context_store = market_context_store
         self.tr_context_requests = {}
         self.is_logged_in = False
+        self.ever_logged_in = False
+        self.last_login_error_code = None
+        self.login_failure_count = 0
         self.require_existing_login = require_existing_login
         self.received_tick_count = 0
 
@@ -58,10 +61,14 @@ class KiwoomClient:
     def on_login(self, err_code):
         if err_code == 0:
             self.is_logged_in = True
+            self.ever_logged_in = True
+            self.last_login_error_code = None
             print("키움 로그인 성공")
             self.register_realtime_codes()
         else:
             self.is_logged_in = False
+            self.last_login_error_code = int(err_code)
+            self.login_failure_count += 1
             print("키움 로그인 실패:", err_code)
 
     def register_realtime_codes(self):

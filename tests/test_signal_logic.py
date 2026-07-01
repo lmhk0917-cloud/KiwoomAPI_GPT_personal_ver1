@@ -30,6 +30,11 @@ def _timeframe(
     above_ma20=True,
     above_vwap=True,
     consecutive_down_bars=0,
+    consecutive_up_bars=0,
+    atr14_pct=None,
+    bb_width_pct=None,
+    volume_ratio_5=None,
+    volume_ratio_20=None,
 ):
     return {
         "latest": {
@@ -49,6 +54,15 @@ def _timeframe(
         },
         "trend": {
             "consecutive_down_bars": consecutive_down_bars,
+            "consecutive_up_bars": consecutive_up_bars,
+        },
+        "volatility": {
+            "atr14_pct": atr14_pct,
+            "bb_width_pct": bb_width_pct,
+        },
+        "volume": {
+            "volume_ratio_5": volume_ratio_5,
+            "volume_ratio_20": volume_ratio_20,
         },
     }
 
@@ -316,6 +330,156 @@ class SignalLogicTest(unittest.TestCase):
         )
 
         self.assertEqual("AVOID_SUPPLY", signal["action_hint"])
+        self.assertEqual("high", signal["risk_level"])
+
+    def test_high_volatility_widens_validation_levels(self):
+        quiet_signal = generate_validation_signal(
+            _summary(
+                ["NEAR_VWAP_SUPPORT", "ORDERBOOK_BID_IMBALANCE"],
+                timeframes={
+                    "1m": _timeframe(close=100, atr14_pct=0.2, bb_width_pct=1.0),
+                    "3m": _timeframe(close=100, atr14_pct=0.2, bb_width_pct=1.0),
+                    "5m": _timeframe(close=100, atr14_pct=0.2, bb_width_pct=1.0),
+                },
+            )
+        )
+        volatile_signal = generate_validation_signal(
+            _summary(
+                ["NEAR_VWAP_SUPPORT", "ORDERBOOK_BID_IMBALANCE"],
+                timeframes={
+                    "1m": _timeframe(close=100, atr14_pct=1.0, bb_width_pct=4.5),
+                    "3m": _timeframe(close=100, atr14_pct=0.8, bb_width_pct=3.0),
+                    "5m": _timeframe(close=100, atr14_pct=0.7, bb_width_pct=2.5),
+                },
+            )
+        )
+
+        self.assertLess(volatile_signal["stop_loss"], quiet_signal["stop_loss"])
+        self.assertGreater(volatile_signal["target_1"], quiet_signal["target_1"])
+        self.assertTrue(any("High-volatility session" in reason for reason in volatile_signal["reasons"]))
+
+    def test_high_volatility_with_confirmation_becomes_expansion_momentum(self):
+        signal = generate_validation_signal(
+            _summary(
+                ["VOLUME_SPIKE", "NEAR_BOX_HIGH", "CONSECUTIVE_UP_BARS"],
+                timeframes={
+                    "1m": _timeframe(
+                        close=100,
+                        return_1bar_pct=0.8,
+                        consecutive_up_bars=3,
+                        atr14_pct=1.0,
+                        bb_width_pct=4.5,
+                        volume_ratio_5=2.2,
+                    ),
+                    "3m": _timeframe(
+                        close=100,
+                        return_1bar_pct=0.5,
+                        consecutive_up_bars=3,
+                        atr14_pct=0.8,
+                        bb_width_pct=3.0,
+                        volume_ratio_5=2.0,
+                    ),
+                    "5m": _timeframe(close=100, return_1bar_pct=0.2, atr14_pct=0.7, bb_width_pct=2.5),
+                },
+                market_context={
+                    "market_indices": {
+                        "kospi200_change_pct": 1.2,
+                        "kosdaq_change_pct": 1.0,
+                    },
+                },
+            )
+        )
+
+        self.assertEqual("VOL_EXPANSION_MOMENTUM", signal["action_hint"])
+        self.assertEqual("high", signal["risk_level"])
+
+    def test_high_volatility_with_supply_risk_becomes_trap(self):
+        signal = generate_validation_signal(
+            _summary(
+                ["VOLUME_SPIKE", "NEAR_BOX_HIGH", "ORDERBOOK_ASK_IMBALANCE"],
+                timeframes={
+                    "1m": _timeframe(
+                        close=100,
+                        return_1bar_pct=-0.5,
+                        above_ma5=False,
+                        above_ma20=False,
+                        above_vwap=False,
+                        atr14_pct=1.0,
+                        bb_width_pct=4.5,
+                        volume_ratio_5=2.2,
+                    ),
+                    "3m": _timeframe(
+                        close=100,
+                        return_1bar_pct=-0.3,
+                        above_ma5=False,
+                        above_ma20=False,
+                        above_vwap=False,
+                        atr14_pct=0.8,
+                        bb_width_pct=3.0,
+                        volume_ratio_5=2.0,
+                    ),
+                    "5m": _timeframe(
+                        close=100,
+                        return_1bar_pct=-0.1,
+                        above_ma5=False,
+                        above_ma20=False,
+                        above_vwap=False,
+                        atr14_pct=0.7,
+                        bb_width_pct=2.5,
+                    ),
+                },
+            )
+        )
+
+        self.assertEqual("AVOID_VOLATILITY_TRAP", signal["action_hint"])
+        self.assertEqual("high", signal["risk_level"])
+
+    def test_high_volatility_supply_risk_with_vwap_recovery_becomes_reversal_watch(self):
+        signal = generate_validation_signal(
+            _summary(
+                ["VOLUME_SPIKE", "NEAR_VWAP_SUPPORT", "ORDERBOOK_ASK_IMBALANCE"],
+                timeframes={
+                    "1m": _timeframe(
+                        close=100,
+                        return_1bar_pct=0.45,
+                        above_ma5=True,
+                        above_ma20=True,
+                        above_vwap=True,
+                        consecutive_up_bars=2,
+                        atr14_pct=1.0,
+                        bb_width_pct=4.5,
+                        volume_ratio_5=2.2,
+                    ),
+                    "3m": _timeframe(
+                        close=100,
+                        return_1bar_pct=0.25,
+                        above_ma5=True,
+                        above_ma20=False,
+                        above_vwap=True,
+                        atr14_pct=0.8,
+                        bb_width_pct=3.0,
+                        volume_ratio_5=2.0,
+                    ),
+                    "5m": _timeframe(
+                        close=100,
+                        return_1bar_pct=-0.1,
+                        above_ma5=False,
+                        above_ma20=False,
+                        above_vwap=False,
+                        atr14_pct=0.7,
+                        bb_width_pct=2.5,
+                    ),
+                },
+                market_context={
+                    "market_indices": {
+                        "kospi200_change_pct": 0.4,
+                        "kosdaq_change_pct": 0.3,
+                    },
+                },
+            )
+        )
+
+        self.assertEqual("HIGH_VOL_REVERSAL_WATCH", signal["action_hint"])
         self.assertEqual("high", signal["risk_level"])
 
 

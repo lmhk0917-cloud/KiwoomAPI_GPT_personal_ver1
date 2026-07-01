@@ -19,6 +19,8 @@ function Test-KiwoomProcessRunning {
     "khministarter",
     "nkmini",
     "nkministarter",
+    "nkstarter",
+    "nkrunlite",
     "khopenapi",
     "koastudiosa",
     "koastudio"

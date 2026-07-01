@@ -29,6 +29,7 @@ class StorageSchemaIndexesTests(unittest.TestCase):
         expected = {
             "idx_event_logs_type_detected_at",
             "idx_signal_logs_action_detected_at",
+            "idx_quant_signal_scores_signal_id_unique",
             "idx_quant_signal_scores_decision_time",
             "idx_paper_trade_results_code_evaluated_at",
         }

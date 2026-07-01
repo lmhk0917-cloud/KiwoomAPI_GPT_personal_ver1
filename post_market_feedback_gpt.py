@@ -9,6 +9,7 @@ adjusted for later backtests.
 import argparse
 import json
 import os
+import re
 from datetime import datetime
 
 from openai import OpenAI
@@ -75,6 +76,7 @@ def main():
     finished_at = datetime.now()
     result = response.choices[0].message.content
     unit_warnings = validate_result_units(result, payload)
+    interpretation_warnings = validate_result_interpretation(result, payload)
 
     output_path = save_result(
         result=result,
@@ -84,6 +86,7 @@ def main():
         model=getattr(response, "model", GPT_MODEL),
         usage=extract_usage(response),
         unit_warnings=unit_warnings,
+        interpretation_warnings=interpretation_warnings,
     )
 
     print("========== Post-Market Feedback GPT ==========")
@@ -99,6 +102,10 @@ def main():
     if unit_warnings:
         print("unit_warnings:")
         for warning in unit_warnings:
+            print(" -", warning)
+    if interpretation_warnings:
+        print("interpretation_warnings:")
+        for warning in interpretation_warnings:
             print(" -", warning)
     export_shared_context(reason="post_market_feedback_gpt")
     print()
@@ -170,6 +177,7 @@ def build_authoritative_metrics(paper_report):
         "by_decision_side": authoritative_group_rows(paper_report.get("by_decision_side", [])),
         "by_code": authoritative_group_rows(paper_report.get("by_code", [])),
         "by_code_action": authoritative_group_rows(paper_report.get("by_code_action", [])),
+        "validation_notes": build_validation_notes(paper_report),
     }
 
 
@@ -193,6 +201,36 @@ def authoritative_group_rows(rows):
         "interpretation_hint",
     ]
     return [select_metric_fields(row, fields) for row in rows]
+
+
+def build_validation_notes(paper_report):
+    """Create deterministic interpretation notes GPT must preserve in prose."""
+    notes = {
+        "missed_upside_actions": [],
+        "worked_caution_actions": [],
+        "negative_long_candidates": [],
+    }
+    for row in paper_report.get("by_action", []):
+        selected = select_metric_fields(row, [
+            "group_name",
+            "signal_count",
+            "evaluated_60m_count",
+            "avg_net_return_60m_pct",
+            "directional_success_60m_pct",
+            "interpretation_hint",
+            "profit_label",
+            "directional_label",
+        ])
+        hint = row.get("interpretation_hint")
+        direction = row.get("directional_label")
+        profit = row.get("profit_label")
+        if hint == "caution_missed_upside" or direction == "direction_contra":
+            notes["missed_upside_actions"].append(selected)
+        elif hint == "caution_worked" or direction == "direction_validated":
+            notes["worked_caution_actions"].append(selected)
+        elif profit in ("negative_net_expectancy", "high_stop_risk"):
+            notes["negative_long_candidates"].append(selected)
+    return notes
 
 
 def select_metric_fields(row, fields):
@@ -302,6 +340,98 @@ CRITICAL NUMERIC UNIT RULES:
 """.format(data=data_json)
 
 
+SYSTEM_PROMPT = (
+    "You are a post-market paper-trade reviewer. "
+    "Do not give buy/sell instructions, position sizing, or automation guidance. "
+    "Write Korean feedback about risk, reward, validation quality, and next-test formula improvements only."
+)
+
+
+def build_prompt(payload):
+    data_json = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
+    unit_guard = """
+CRITICAL NUMERIC UNIT RULES:
+- Fields ending in _pct are already percent values.
+- Return fields such as avg_return_60m_pct and avg_net_return_60m_pct are percent points, not decimal fractions.
+- Example: 0.185 means 0.185%, not 18.5%.
+- Example: 0.924 means 0.924%, not 92.4%.
+- Example: -0.125 means -0.125%, not -12.5%.
+- Never multiply *_pct values by 100.
+- If summarizing returns, copy values from avg_return_*_pct and avg_net_return_*_pct as-is with a % suffix.
+- Do not call a result profitable when avg_net_return_60m_pct is negative.
+- Prefer authoritative_metrics for every quoted number.
+- Keep profit_label and directional_label separate.
+- Keep partial_evaluated_count and pending_count separate from 60m headline returns.
+"""
+
+    return unit_guard + """
+You review a Korean intraday validation system after market close.
+The data below contains saved paper-trade results, quant scores, GPT decisions, and market context.
+
+Goals:
+- Evaluate whether today's signals matched later returns.
+- Separate profit quality from directional validation.
+- A caution/avoid signal with positive later return is missed upside, not a profitable avoid signal.
+- Compare GPT judgement with deterministic quant rules.
+- Propose formula changes and validation steps for the next test.
+- Do not suggest real orders, position sizes, or automated trading.
+
+Rules:
+- GPT is a risk/reward reviewer, not a buy signal generator.
+- News, community, and text context can adjust risk review, but must not dominate deterministic validation.
+- If sample size is insufficient, say so plainly.
+- Treat market circuit breaker, crash risk, VI, and sidecar as hard-risk overrides.
+- Use authoritative_metrics for quoted numbers.
+- If interpretation_hint is caution_missed_upside, explain it as over-defensive classification.
+- Do not list validation_notes.missed_upside_actions under "잘 맞은 신호".
+- Put validation_notes.missed_upside_actions under "과도하게 회피한 신호".
+- Put validation_notes.worked_caution_actions under "잘 맞은 신호" only when direction was validated.
+
+Data:
+{data}
+
+Output in Korean with this exact structure:
+
+# 장마감 피드백
+## 1. 오늘 신호 성과 요약
+- 전체 성과:
+- 종목별 성과:
+- 잘 맞은 신호:
+- 나빴던 신호:
+- 과도하게 회피한 신호:
+
+## 2. GPT와 정량식 비교
+- 일치한 판단:
+- 불일치한 판단:
+- GPT가 과대평가한 요소:
+- 정량식이 놓친 요소:
+
+## 3. 시장 컨텍스트 사후 해석
+- 가격/거래량으로 설명 가능한 부분:
+- 뉴스/공시/매크로로 보완되는 부분:
+- 서킷브레이커/급락/VI/사이드카 반영 여부:
+- 다음날 리스크 메모:
+
+## 4. 다음 테스트용 수식 제안
+- TrendScore:
+- BreakoutScore:
+- VolumeFlowScore:
+- ExpectedValueScore:
+- MarketRegimeScore:
+- RiskRewardScore:
+- GPTAgreementScore:
+- RiskPenalty:
+- CostPenalty:
+- CombinedScore:
+
+## 5. 검증 계획
+- 내일 유지할 규칙:
+- 줄일 규칙:
+- 버릴 규칙:
+- 추가로 필요한 데이터:
+""".format(data=data_json)
+
+
 def collect_return_pct_values(value, path="payload"):
     values = []
     if isinstance(value, dict):
@@ -335,7 +465,8 @@ def validate_result_units(result, payload):
         for decimals in (1, 2, 3):
             scaled_text = "{:.{}f}".format(scaled, decimals).rstrip("0").rstrip(".")
             needle = "{}%".format(scaled_text)
-            if needle in result_text and (path, needle) not in seen:
+            pattern = r"(?<![\d.]){}(?![\d.])".format(re.escape(needle))
+            if re.search(pattern, result_text) and (path, needle) not in seen:
                 warnings.append(
                     "possible pct rescale: {}={} may have been reported as {}".format(path, value, needle)
                 )
@@ -343,7 +474,54 @@ def validate_result_units(result, payload):
     return warnings
 
 
-def save_result(result, payload, started_at, finished_at, model, usage, unit_warnings=None):
+def validate_result_interpretation(result, payload):
+    """Warn when GPT contradicts deterministic validation labels."""
+    if not result:
+        return []
+
+    notes = (
+        payload.get("authoritative_metrics", {})
+        .get("validation_notes", {})
+    )
+    missed = notes.get("missed_upside_actions") or []
+    result_text = str(result)
+    well_matched_line = _section_line(result_text, "- 잘 맞은 신호:")
+    over_defensive_line = _section_line(result_text, "- 과도하게 회피한 신호:")
+
+    warnings = []
+    for item in missed:
+        action = item.get("group_name")
+        if not action:
+            continue
+        if action in well_matched_line:
+            warnings.append(
+                "missed-upside action listed as well-matched: {}".format(action)
+            )
+        if action not in over_defensive_line:
+            warnings.append(
+                "missed-upside action missing from over-defensive line: {}".format(action)
+            )
+    return warnings
+
+
+def _section_line(text, prefix):
+    for line in str(text).splitlines():
+        stripped = line.strip()
+        if stripped.startswith(prefix):
+            return stripped
+    return ""
+
+
+def save_result(
+    result,
+    payload,
+    started_at,
+    finished_at,
+    model,
+    usage,
+    unit_warnings=None,
+    interpretation_warnings=None,
+):
     ensure_app_dirs()
     stamp = finished_at.strftime("%Y%m%d_%H%M%S")
     output_path = os.path.join(EXPORTS_DIR, "post_market_feedback_{}.md".format(stamp))
@@ -359,6 +537,11 @@ def save_result(result, payload, started_at, finished_at, model, usage, unit_war
         if unit_warnings:
             fp.write("## Unit Warnings\n\n")
             for warning in unit_warnings:
+                fp.write("- {}\n".format(warning))
+            fp.write("\n")
+        if interpretation_warnings:
+            fp.write("## Interpretation Warnings\n\n")
+            for warning in interpretation_warnings:
                 fp.write("- {}\n".format(warning))
             fp.write("\n")
         fp.write(result or "")

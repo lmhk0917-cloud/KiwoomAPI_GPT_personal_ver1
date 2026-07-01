@@ -8,6 +8,18 @@ paper-trade outcomes.
 from datetime import datetime
 
 from config import (
+    QUANT_EXTREME_VOL_CAUTION_BONUS,
+    QUANT_EXTREME_VOL_LONG_PENALTY,
+    QUANT_HIGH_VOL_CAUTION_BONUS,
+    QUANT_HIGH_VOL_LONG_PENALTY,
+    QUANT_VOL_OPPORTUNITY_CAUTION_DISCOUNT,
+    QUANT_VOL_OPPORTUNITY_LONG_BONUS,
+    QUANT_VOL_TRAP_CAUTION_BONUS,
+    QUANT_VOL_TRAP_LONG_PENALTY,
+    SIGNAL_EXTREME_VOL_ATR_PCT,
+    SIGNAL_EXTREME_VOL_BB_WIDTH_PCT,
+    SIGNAL_HIGH_VOL_ATR_PCT,
+    SIGNAL_HIGH_VOL_BB_WIDTH_PCT,
     TRADE_BUY_FEE_PCT,
     TRADE_SELL_FEE_PCT,
     TRADE_SELL_TAX_PCT,
@@ -29,6 +41,8 @@ LONG_ACTIONS = set((
     "WATCH_BREAKOUT",
     "WATCH_SUPPORT",
     "WATCH_MOMENTUM",
+    "VOL_EXPANSION_MOMENTUM",
+    "HIGH_VOL_REVERSAL_WATCH",
 ))
 CAUTION_ACTIONS = set((
     "AVOID_CHASE",
@@ -37,6 +51,7 @@ CAUTION_ACTIONS = set((
     "WATCH_RESISTANCE",
     "OBSERVE_EVENT",
     "AVOID_MARKET_RISK",
+    "AVOID_VOLATILITY_TRAP",
 ))
 HIGH_RISK_EVENTS = set((
     "MARKET_FOREIGN_SELL_PRESSURE",
@@ -52,6 +67,8 @@ HARD_OVERRIDE_EVENTS = set((
     "MARKET_VI_ACTIVE",
 ))
 
+MIN_FEEDBACK_SAMPLE = 10
+
 
 def build_quant_signal_score(signal, summary, signal_id=None, scored_at=None):
     """Build a structured deterministic score row from one signal and summary."""
@@ -63,25 +80,28 @@ def build_quant_signal_score(signal, summary, signal_id=None, scored_at=None):
     decision_side = _decision_side(action_hint)
 
     sub_scores, reasons = _build_sub_scores(signal, summary, event_types, decision_side)
-    risk_penalty = sub_scores["risk_penalty"]
-    cost_penalty = sub_scores["cost_penalty"]
-    final_quant_score = _clip(
-        0.25 * sub_scores["trend_score"]
-        + 0.20 * sub_scores["breakout_score"]
-        + 0.15 * sub_scores["volume_flow_score"]
-        + 0.15 * sub_scores["expected_value_score"]
-        + 0.10 * sub_scores["market_regime_score"]
-        + 0.10 * sub_scores["risk_reward_score"]
-        + 0.05 * sub_scores["gpt_agreement_score"]
-        - risk_penalty
-        - cost_penalty
+    long_score, caution_score, feedback_reasons = _side_scores(
+        signal=signal,
+        summary=summary,
+        sub_scores=sub_scores,
+        decision_side=decision_side,
+        action_hint=action_hint,
     )
+    reasons.extend(feedback_reasons)
+    if decision_side == "long_candidate":
+        final_quant_score = long_score
+    elif decision_side == "caution_or_avoid":
+        final_quant_score = caution_score
+    else:
+        final_quant_score = _clip((long_score + caution_score) / 2)
 
     hard_overrides = _hard_overrides(summary, event_types)
     if hard_overrides:
         decision_side = "caution_or_avoid"
         action_hint = "AVOID_MARKET_RISK"
         final_quant_score = min(final_quant_score, 25)
+        caution_score = max(caution_score, 85)
+        long_score = min(long_score, 20)
         sub_scores["market_regime_score"] = min(sub_scores["market_regime_score"], 10)
         sub_scores["risk_reward_score"] = min(sub_scores["risk_reward_score"], 20)
         reasons.append(
@@ -103,6 +123,9 @@ def build_quant_signal_score(signal, summary, signal_id=None, scored_at=None):
         hard_overrides=hard_overrides,
         reasons=reasons,
         final_quant_score=final_quant_score,
+        long_score=long_score,
+        caution_score=caution_score,
+        score_confidence=_score_confidence(summary, action_hint),
     )
     return {
         "signal_id": signal_id,
@@ -142,6 +165,114 @@ def _build_sub_scores(signal, summary, event_types, decision_side):
         "risk_penalty": risk_penalty,
         "cost_penalty": cost_penalty,
     }, reasons
+
+
+def _side_scores(signal, summary, sub_scores, decision_side, action_hint):
+    """Return separate long-quality and caution-quality scores.
+
+    Long score is intentionally stricter because recent paper results show that
+    candidate-long actions lose money after costs unless feedback is strong.
+    Caution score measures risk-warning usefulness, not long-entry quality.
+    """
+    reasons = []
+    risk_penalty = sub_scores["risk_penalty"]
+    cost_penalty = sub_scores["cost_penalty"]
+    market_risk = _market_risk_score(sub_scores, _event_types(summary), signal.get("risk_level"))
+    volatility = _volatility_adjustment(summary)
+
+    long_score = (
+        0.22 * sub_scores["trend_score"]
+        + 0.18 * sub_scores["breakout_score"]
+        + 0.16 * sub_scores["volume_flow_score"]
+        + 0.20 * sub_scores["expected_value_score"]
+        + 0.10 * sub_scores["market_regime_score"]
+        + 0.10 * sub_scores["risk_reward_score"]
+        + 0.04 * sub_scores["gpt_agreement_score"]
+        - risk_penalty
+        - cost_penalty
+    )
+    caution_score = (
+        0.30 * market_risk
+        + 0.20 * (100 - sub_scores["expected_value_score"])
+        + 0.18 * (100 - sub_scores["trend_score"])
+        + 0.12 * (100 - sub_scores["volume_flow_score"])
+        + 0.10 * (100 - sub_scores["market_regime_score"])
+        + 0.05 * (100 - sub_scores["risk_reward_score"])
+        + 0.05 * sub_scores["gpt_agreement_score"]
+        + 0.40 * risk_penalty
+    )
+
+    if volatility["classification"] == "opportunity":
+        long_score += volatility["opportunity_long_bonus"]
+        caution_score -= volatility["opportunity_caution_discount"]
+        reasons.append(
+            "Volatility expansion has directional confirmation, so treat it as opportunity context."
+        )
+    elif volatility["classification"] == "reversal":
+        long_score += volatility["reversal_long_bonus"]
+        caution_score -= volatility["reversal_caution_discount"]
+        reasons.append(
+            "Volatility stress has recovery confirmation, so track it as reversal-watch context."
+        )
+    elif volatility["classification"] == "trap":
+        long_score -= volatility["trap_long_penalty"]
+        caution_score += volatility["trap_caution_bonus"]
+        reasons.append(
+            "Volatility expansion lacks confirmation or has supply risk, so treat it as trap context."
+        )
+    elif volatility["level"] != "normal":
+        long_score -= volatility["long_penalty"]
+        caution_score += volatility["caution_bonus"]
+        reasons.append(
+            "Elevated intraday volatility adds long-score penalty and caution-score bonus."
+        )
+
+    action_feedback = _action_feedback(summary, action_hint)
+    overview = (_quant_snapshot(summary).get("overview") or {})
+    feedback_block = action_feedback or overview
+    feedback_sample = _number(feedback_block.get("evaluated_60m_count"))
+    if feedback_sample is None:
+        feedback_sample = _number(feedback_block.get("evaluated_count"), 0)
+    net60 = _first_number(feedback_block, ("avg_net_return_60m_pct", "expectancy_60m_pct"))
+    win60 = _number(feedback_block.get("win_rate_60m_pct"))
+    directional60 = _number(feedback_block.get("directional_success_60m_pct"))
+    stop_rate = _number(feedback_block.get("stop_loss_hit_rate_pct"))
+
+    if feedback_sample < MIN_FEEDBACK_SAMPLE:
+        long_score -= 8
+        caution_score += 4
+        reasons.append("Action feedback sample is below long-score threshold.")
+    if net60 is not None and net60 < 0:
+        penalty = min(18, abs(net60) * 24)
+        long_score -= penalty
+        caution_score += min(12, penalty * 0.7)
+        reasons.append("Action feedback has negative 60m net expectancy.")
+    elif net60 is not None and net60 > 0:
+        bonus = min(10, net60 * 18)
+        long_score += bonus
+        caution_score -= min(8, bonus * 0.6)
+    if win60 is not None and win60 < 45:
+        long_score -= 8
+    if stop_rate is not None and stop_rate >= 50:
+        long_score -= min(14, (stop_rate - 45) * 0.45)
+        caution_score += min(12, (stop_rate - 45) * 0.35)
+        reasons.append("Stop-hit rate is too high for a permissive long score.")
+    if directional60 is not None:
+        if decision_side == "long_candidate" and directional60 < 50:
+            long_score -= min(12, (50 - directional60) * 0.45)
+        elif decision_side == "caution_or_avoid" and directional60 >= 55:
+            caution_score += min(10, (directional60 - 50) * 0.35)
+        elif decision_side == "caution_or_avoid" and directional60 < 40:
+            caution_score -= min(12, (40 - directional60) * 0.45)
+            reasons.append("Caution action has recently missed upside.")
+
+    if decision_side == "long_candidate":
+        long_score -= 5
+    if action_hint in ("WATCH_SUPPORT", "WATCH_PULLBACK") and (net60 is None or net60 <= 0):
+        long_score -= 6
+        reasons.append("Support/pullback requires positive net feedback before promotion.")
+
+    return _clip(long_score), _clip(caution_score), reasons
 
 
 def _trend_score(summary, trend_counts, reasons):
@@ -384,19 +515,33 @@ def _market_risk_score(sub_scores, event_types, risk_level):
     return _clip(score)
 
 
-def _feature_snapshot(signal, summary, sub_scores, hard_overrides, reasons, final_quant_score):
+def _feature_snapshot(
+    signal,
+    summary,
+    sub_scores,
+    hard_overrides,
+    reasons,
+    final_quant_score,
+    long_score,
+    caution_score,
+    score_confidence,
+):
     primary = _primary_timeframe(summary)
     latest = primary.get("latest") or {}
     volume = primary.get("volume") or {}
     vwap = primary.get("vwap") or {}
     moving_average = primary.get("moving_average") or {}
     trend = primary.get("trend") or {}
+    volatility = _volatility_adjustment(summary)
     quant_snapshot = _quant_snapshot(summary)
     return {
         "formula_version": FORMULA_VERSION,
         "events": [event.get("type") for event in summary.get("events") or []],
         "risk_level": signal.get("risk_level"),
         "score_label": _score_label(final_quant_score, hard_overrides),
+        "long_score": long_score,
+        "caution_score": caution_score,
+        "score_confidence": score_confidence,
         "sub_scores": sub_scores,
         "hard_overrides": hard_overrides,
         "score_reasons": _dedupe(reasons)[:8],
@@ -413,9 +558,18 @@ def _feature_snapshot(signal, summary, sub_scores, hard_overrides, reasons, fina
         "price_above_ma20": moving_average.get("price_above_ma20"),
         "consecutive_up_bars": trend.get("consecutive_up_bars"),
         "consecutive_down_bars": trend.get("consecutive_down_bars"),
+        "volatility_level": volatility.get("level"),
+        "volatility_atr_pct": volatility.get("atr_pct"),
+        "volatility_bb_width_pct": volatility.get("bb_width_pct"),
+        "volatility_long_penalty": volatility.get("long_penalty"),
+        "volatility_caution_bonus": volatility.get("caution_bonus"),
+        "volatility_classification": volatility.get("classification"),
+        "volatility_opportunity_score": volatility.get("opportunity_score"),
+        "volatility_trap_score": volatility.get("trap_score"),
         "quant_feedback_label": (quant_snapshot.get("guidance") or {}).get("label"),
         "quant_feedback_net_60m": (quant_snapshot.get("overview") or {}).get("avg_net_return_60m_pct"),
         "quant_feedback_profit_factor_60m": (quant_snapshot.get("overview") or {}).get("profit_factor_60m"),
+        "action_feedback": _action_feedback(summary, signal.get("action_hint")) or {},
     }
 
 
@@ -507,12 +661,171 @@ def _market_sidecar_direction(summary):
     return str(direction).strip().lower()
 
 
+def _volatility_adjustment(summary):
+    atr_values = []
+    bb_width_values = []
+    for timeframe in (summary.get("timeframes") or {}).values():
+        volatility = timeframe.get("volatility") or {}
+        atr_pct = _number(volatility.get("atr14_pct"))
+        bb_width_pct = _number(volatility.get("bb_width_pct"))
+        if atr_pct is not None:
+            atr_values.append(atr_pct)
+        if bb_width_pct is not None:
+            bb_width_values.append(bb_width_pct)
+
+    atr_pct = max(atr_values) if atr_values else None
+    bb_width_pct = max(bb_width_values) if bb_width_values else None
+    level = "normal"
+    if (
+        (atr_pct is not None and atr_pct >= SIGNAL_EXTREME_VOL_ATR_PCT)
+        or (bb_width_pct is not None and bb_width_pct >= SIGNAL_EXTREME_VOL_BB_WIDTH_PCT)
+    ):
+        level = "extreme"
+    elif (
+        (atr_pct is not None and atr_pct >= SIGNAL_HIGH_VOL_ATR_PCT)
+        or (bb_width_pct is not None and bb_width_pct >= SIGNAL_HIGH_VOL_BB_WIDTH_PCT)
+    ):
+        level = "high"
+
+    classification, opportunity_score, trap_score = _volatility_classification(summary, level)
+
+    if level == "extreme":
+        long_penalty = QUANT_EXTREME_VOL_LONG_PENALTY
+        caution_bonus = QUANT_EXTREME_VOL_CAUTION_BONUS
+    elif level == "high":
+        long_penalty = QUANT_HIGH_VOL_LONG_PENALTY
+        caution_bonus = QUANT_HIGH_VOL_CAUTION_BONUS
+    else:
+        long_penalty = 0
+        caution_bonus = 0
+
+    return {
+        "level": level,
+        "atr_pct": round(atr_pct, 3) if atr_pct is not None else None,
+        "bb_width_pct": round(bb_width_pct, 3) if bb_width_pct is not None else None,
+        "long_penalty": long_penalty,
+        "caution_bonus": caution_bonus,
+        "classification": classification,
+        "opportunity_score": opportunity_score,
+        "trap_score": trap_score,
+        "opportunity_long_bonus": QUANT_VOL_OPPORTUNITY_LONG_BONUS,
+        "opportunity_caution_discount": QUANT_VOL_OPPORTUNITY_CAUTION_DISCOUNT,
+        "reversal_long_bonus": round(QUANT_VOL_OPPORTUNITY_LONG_BONUS * 0.75, 3),
+        "reversal_caution_discount": round(QUANT_VOL_OPPORTUNITY_CAUTION_DISCOUNT * 0.75, 3),
+        "trap_long_penalty": QUANT_VOL_TRAP_LONG_PENALTY,
+        "trap_caution_bonus": QUANT_VOL_TRAP_CAUTION_BONUS,
+    }
+
+
+def _volatility_classification(summary, level):
+    if level == "normal":
+        return "normal", 0, 0
+
+    event_types = _event_types(summary)
+    trend_counts = _trend_counts(summary)
+    vwap_confirming = _price_above_vwap_timeframes(summary)
+    volume_score = _volatility_volume_score(summary, event_types)
+    market_score = _volatility_market_score(summary)
+    hard_risk = bool(event_types.intersection(HARD_OVERRIDE_EVENTS))
+    supply_risk = bool(event_types.intersection(set((
+        "MARKET_FOREIGN_SELL_PRESSURE",
+        "ORDERBOOK_ASK_IMBALANCE",
+    ))))
+
+    opportunity_score = 0
+    opportunity_score += 25 if trend_counts.get("bullish", 0) >= 2 else 0
+    opportunity_score += 20 if vwap_confirming >= 2 else 0
+    opportunity_score += volume_score
+    opportunity_score += market_score
+    opportunity_score += 15 if "VOLUME_SPIKE" in event_types else 0
+
+    trap_score = 0
+    trap_score += 35 if hard_risk else 0
+    trap_score += 22 if supply_risk else 0
+    trap_score += 20 if trend_counts.get("bearish", 0) >= 2 else 0
+    trap_score += 15 if vwap_confirming <= 1 else 0
+    trap_score += 10 if market_score < 0 else 0
+
+    if (
+        supply_risk
+        and not hard_risk
+        and vwap_confirming >= 2
+        and volume_score >= 12
+        and trend_counts.get("bullish", 0) >= 1
+        and trend_counts.get("bearish", 0) < 3
+        and market_score >= 0
+    ):
+        return "reversal", min(opportunity_score, 100), min(trap_score, 100)
+
+    if opportunity_score >= 55 and trap_score < 35:
+        return "opportunity", min(opportunity_score, 100), min(trap_score, 100)
+    if trap_score >= 35:
+        return "trap", min(opportunity_score, 100), min(trap_score, 100)
+    return "unclear", min(opportunity_score, 100), min(trap_score, 100)
+
+
+def _price_above_vwap_timeframes(summary):
+    count = 0
+    for timeframe in (summary.get("timeframes") or {}).values():
+        if (timeframe.get("vwap") or {}).get("price_above_vwap") is True:
+            count += 1
+    return count
+
+
+def _volatility_volume_score(summary, event_types):
+    ratios = []
+    for timeframe in (summary.get("timeframes") or {}).values():
+        volume = timeframe.get("volume") or {}
+        for key in ("volume_ratio_5", "volume_ratio_20"):
+            value = _number(volume.get(key))
+            if value is not None:
+                ratios.append(value)
+    max_ratio = max(ratios) if ratios else None
+    if max_ratio is None:
+        return 15 if "VOLUME_SPIKE" in event_types else 0
+    return min(max((max_ratio - 1.0) * 18, 0), 25)
+
+
+def _volatility_market_score(summary):
+    market_context = summary.get("market_context") or {}
+    market_indices = market_context.get("market_indices") or {}
+    avg_change = _avg(_market_index_changes(market_indices))
+    if avg_change is None:
+        return 0
+    return max(min(avg_change * 10, 20), -20)
+
+
 def _quant_snapshot(summary):
     return (
         ((summary.get("historical_signal_stats") or {}).get("learning_feedback") or {})
         .get("quant_snapshot")
         or {}
     )
+
+
+def _action_feedback(summary, action_hint):
+    if not action_hint:
+        return None
+    for item in (_quant_snapshot(summary).get("by_action") or []):
+        if item.get("action_hint") == action_hint:
+            return item
+    return None
+
+
+def _score_confidence(summary, action_hint):
+    action_feedback = _action_feedback(summary, action_hint)
+    overview = (_quant_snapshot(summary).get("overview") or {})
+    feedback = action_feedback or overview
+    evaluated = _number(feedback.get("evaluated_60m_count"))
+    if evaluated is None:
+        evaluated = _number(feedback.get("evaluated_count"), 0)
+    if evaluated >= 100:
+        return "high"
+    if evaluated >= MIN_FEEDBACK_SAMPLE:
+        return "medium"
+    if evaluated > 0:
+        return "low"
+    return "unknown"
 
 
 def _primary_timeframe(summary):

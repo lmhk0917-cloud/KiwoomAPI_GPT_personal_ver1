@@ -217,7 +217,9 @@ class KiwoomFocusedDashboardTests(unittest.TestCase):
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 1, "2026-06-22 09:00:10.000000", "005930", "OBSERVE_EVENT",
-                52.0, 48.0, 35.0, 50.5, "caution_or_avoid", "{}", "test",
+                52.0, 48.0, 35.0, 50.5, "caution_or_avoid",
+                '{"long_score": 22.5, "caution_score": 71.5, "score_confidence": "medium"}',
+                "test",
             ))
             conn.execute("""
                 INSERT INTO gpt_analysis_scores (
@@ -267,6 +269,9 @@ class KiwoomFocusedDashboardTests(unittest.TestCase):
             self.assertEqual("2026-06-22 10:01:00.000000", snapshot["latest"]["quant_feedback_snapshots"])
             self.assertEqual(1, len(snapshot["recent_score_compare"]))
             self.assertEqual("watch", snapshot["recent_score_compare"][0]["gpt_decision"])
+            self.assertEqual(22.5, snapshot["recent_score_compare"][0]["long_score"])
+            self.assertEqual(71.5, snapshot["recent_score_compare"][0]["caution_score"])
+            self.assertEqual("medium", snapshot["recent_score_compare"][0]["score_confidence"])
             self.assertEqual(4, len(snapshot["horizon_summary"]))
             self.assertEqual(5, snapshot["horizon_summary"][0]["horizon_min"])
             self.assertEqual(1, snapshot["horizon_summary"][0]["evaluated_count"])

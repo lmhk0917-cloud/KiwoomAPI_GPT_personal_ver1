@@ -267,6 +267,7 @@ INDEX_SQL = [
     "CREATE INDEX IF NOT EXISTS idx_signal_logs_code_detected_at ON signal_logs (code, detected_at)",
     "CREATE INDEX IF NOT EXISTS idx_signal_logs_action_detected_at ON signal_logs (action_hint, detected_at)",
     "CREATE INDEX IF NOT EXISTS idx_quant_signal_scores_signal_id ON quant_signal_scores (signal_id)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_quant_signal_scores_signal_id_unique ON quant_signal_scores (signal_id) WHERE signal_id IS NOT NULL",
     "CREATE INDEX IF NOT EXISTS idx_quant_signal_scores_code_time ON quant_signal_scores (code, scored_at)",
     "CREATE INDEX IF NOT EXISTS idx_quant_signal_scores_decision_time ON quant_signal_scores (decision_side, scored_at)",
     "CREATE INDEX IF NOT EXISTS idx_paper_trade_results_signal_id ON paper_trade_results (signal_id)",

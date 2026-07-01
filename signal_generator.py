@@ -23,6 +23,12 @@ from config import (
     SIGNAL_RESISTANCE_MIN_CONFIRMING_VWAP_TIMEFRAMES,
     SIGNAL_REQUIRE_RESISTANCE_CONFIRMATION,
     SIGNAL_REQUIRE_SUPPLY_CONFIRMATION,
+    SIGNAL_HIGH_VOL_ATR_PCT,
+    SIGNAL_EXTREME_VOL_ATR_PCT,
+    SIGNAL_HIGH_VOL_BB_WIDTH_PCT,
+    SIGNAL_EXTREME_VOL_BB_WIDTH_PCT,
+    SIGNAL_HIGH_VOL_LEVEL_MULTIPLIER,
+    SIGNAL_EXTREME_VOL_LEVEL_MULTIPLIER,
 )
 from signal_quality import apply_quality_tuning, pullback_stop_loss
 
@@ -287,6 +293,17 @@ def generate_validation_signal(summary, settings=None):
         settings=settings,
     )
 
+    action_hint, confidence_score, risk_level, reasons = _apply_volatility_action_split(
+        summary=summary,
+        event_types=event_types,
+        trend_state=trend_state,
+        action_hint=action_hint,
+        confidence_score=confidence_score,
+        risk_level=risk_level,
+        reasons=reasons,
+        settings=settings,
+    )
+
     if not reasons:
         reasons.append("Event detected, but no strong validation pattern yet.")
 
@@ -299,6 +316,17 @@ def generate_validation_signal(summary, settings=None):
 
     if action_hint == "WATCH_PULLBACK":
         stop_loss = pullback_stop_loss(current_price, stop_loss)
+
+    stop_loss, target_1, target_2, volatility_note = _apply_volatility_level_adjustment(
+        summary=summary,
+        current_price=current_price,
+        stop_loss=stop_loss,
+        target_1=target_1,
+        target_2=target_2,
+        settings=settings,
+    )
+    if volatility_note:
+        reasons.append(volatility_note)
 
     return {
         "action_hint": action_hint,
@@ -524,6 +552,223 @@ def _apply_pullback_safety_filter(
         return "OBSERVE_EVENT", confidence_score, risk_level, reasons
 
     return action_hint, confidence_score, risk_level, reasons
+
+
+def _apply_volatility_action_split(
+    summary,
+    event_types,
+    trend_state,
+    action_hint,
+    confidence_score,
+    risk_level,
+    reasons,
+    settings=None,
+):
+    """Split elevated volatility into opportunity, reversal-watch, or trap labels."""
+    if action_hint == "AVOID_MARKET_RISK":
+        return action_hint, confidence_score, risk_level, reasons
+
+    vol = _volatility_context(summary)
+    level = _volatility_level(vol, settings=settings)
+    if level == "normal":
+        return action_hint, confidence_score, risk_level, reasons
+
+    classification = _classify_volatility_setup(summary, event_types, trend_state)
+    if classification == "trap":
+        if action_hint.startswith("WATCH_") or action_hint == "OBSERVE_EVENT":
+            action_hint = "AVOID_VOLATILITY_TRAP"
+            confidence_score += 10
+            risk_level = "high"
+            reasons.append(
+                "High volatility lacks directional confirmation or has supply risk; classify as volatility trap."
+            )
+        return action_hint, confidence_score, risk_level, reasons
+
+    if classification == "reversal":
+        action_hint = "HIGH_VOL_REVERSAL_WATCH"
+        confidence_score += 6
+        risk_level = "high"
+        reasons.append(
+            "High volatility still has risk, but VWAP recovery, volume, and market context support a reversal watch."
+        )
+        return action_hint, confidence_score, risk_level, reasons
+
+    if classification != "opportunity":
+        reasons.append("High volatility is present, but directional opportunity confirmation is incomplete.")
+        return action_hint, confidence_score, "high", reasons
+
+    if _is_volatility_breakout_context(summary, event_types):
+        action_hint = "VOL_EXPANSION_MOMENTUM"
+        confidence_score += 8
+        risk_level = "high"
+        reasons.append(
+            "High volatility is aligned with volume, VWAP, trend, and market context; classify as expansion momentum."
+        )
+    elif _is_volatility_reversal_context(event_types, action_hint):
+        action_hint = "HIGH_VOL_REVERSAL_WATCH"
+        confidence_score += 6
+        risk_level = "high"
+        reasons.append(
+            "High volatility has rebound ingredients after stress; classify as reversal watch, not immediate chase."
+        )
+
+    return action_hint, confidence_score, risk_level, reasons
+
+
+def _classify_volatility_setup(summary, event_types, trend_state):
+    hard_risk_events = {
+        "MARKET_CIRCUIT_BREAKER_ACTIVE",
+        "MARKET_CRASH_RISK",
+        "MARKET_VI_ACTIVE",
+        "MARKET_SIDECAR_ACTIVE",
+    }
+    supply_events = {
+        "MARKET_FOREIGN_SELL_PRESSURE",
+        "ORDERBOOK_ASK_IMBALANCE",
+    }
+    bullish_timeframes = _bullish_timeframes(summary)
+    above_vwap = _price_above_vwap_timeframes(summary)
+    volume_confirmed = _has_volume_confirmation(summary, event_types)
+    market_score = _market_context_score(summary)
+    market_risk_on = market_score >= 0
+
+    if event_types.intersection(hard_risk_events):
+        return "trap"
+
+    if (
+        event_types.intersection(supply_events)
+        and _is_high_volatility_reversal_candidate(
+            bullish_timeframes=bullish_timeframes,
+            above_vwap=above_vwap,
+            volume_confirmed=volume_confirmed,
+            market_score=market_score,
+            trend_state=trend_state,
+        )
+    ):
+        return "reversal"
+
+    if event_types.intersection(supply_events):
+        return "trap"
+
+    if (
+        bullish_timeframes >= 2
+        and above_vwap >= 2
+        and volume_confirmed
+        and market_risk_on
+    ):
+        return "opportunity"
+
+    if trend_state.get("bearish_timeframes", 0) >= 2 or above_vwap <= 1:
+        return "trap"
+
+    return "unclear"
+
+
+def _is_high_volatility_reversal_candidate(
+    bullish_timeframes,
+    above_vwap,
+    volume_confirmed,
+    market_score,
+    trend_state,
+):
+    """Return True when elevated volatility looks like recoverable stress, not a trap."""
+    if not volume_confirmed:
+        return False
+    if above_vwap < 2:
+        return False
+    if bullish_timeframes < 1:
+        return False
+    if market_score < 0:
+        return False
+    if trend_state.get("bearish_timeframes", 0) >= 3:
+        return False
+    return True
+
+
+def _is_volatility_breakout_context(summary, event_types):
+    return (
+        ("VOLUME_SPIKE" in event_types or _has_volume_confirmation(summary, event_types))
+        and (
+            "NEAR_BOX_HIGH" in event_types
+            or "CONSECUTIVE_UP_BARS" in event_types
+            or _bullish_timeframes(summary) >= 2
+        )
+    )
+
+
+def _is_volatility_reversal_context(event_types, action_hint):
+    return (
+        action_hint in ("WATCH_REBOUND", "WATCH_PULLBACK", "WATCH_SUPPORT")
+        or bool(event_types.intersection(set((
+            "RSI_OVERSOLD",
+            "NEAR_BOX_LOW",
+            "NEAR_VWAP_SUPPORT",
+            "ORDERBOOK_BID_IMBALANCE",
+        ))))
+    )
+
+
+def _bullish_timeframes(summary):
+    count = 0
+    for timeframe in (summary.get("timeframes") or {}).values():
+        latest = timeframe.get("latest") or {}
+        moving_average = timeframe.get("moving_average") or {}
+        vwap = timeframe.get("vwap") or {}
+        trend = timeframe.get("trend") or {}
+        votes = 0
+        return_1bar = _to_float(latest.get("return_1bar_pct"))
+        if return_1bar is not None and return_1bar > 0:
+            votes += 1
+        if moving_average.get("price_above_ma5") is True:
+            votes += 1
+        if moving_average.get("price_above_ma20") is True:
+            votes += 1
+        if vwap.get("price_above_vwap") is True:
+            votes += 1
+        if (_to_float(trend.get("consecutive_up_bars")) or 0) >= 3:
+            votes += 1
+        if votes >= 3:
+            count += 1
+    return count
+
+
+def _price_above_vwap_timeframes(summary):
+    count = 0
+    for timeframe in (summary.get("timeframes") or {}).values():
+        if (timeframe.get("vwap") or {}).get("price_above_vwap") is True:
+            count += 1
+    return count
+
+
+def _has_volume_confirmation(summary, event_types):
+    if "VOLUME_SPIKE" in event_types:
+        return True
+    for timeframe in (summary.get("timeframes") or {}).values():
+        volume = timeframe.get("volume") or {}
+        ratio_5 = _to_float(volume.get("volume_ratio_5"))
+        ratio_20 = _to_float(volume.get("volume_ratio_20"))
+        if (ratio_5 is not None and ratio_5 >= 1.8) or (ratio_20 is not None and ratio_20 >= 1.8):
+            return True
+    return False
+
+
+def _market_context_score(summary):
+    market_context = summary.get("market_context") or {}
+    market_indices = market_context.get("market_indices") or {}
+    changes = []
+    for key in (
+        "kospi_change_pct",
+        "kospi200_change_pct",
+        "kosdaq_change_pct",
+        "kosdaq150_change_pct",
+        "kospi200_futures_change_pct",
+    ):
+        value = _to_float(market_indices.get(key))
+        if value is not None:
+            changes.append(value)
+    if not changes:
+        return 0
+    return sum(changes) / float(len(changes))
 
 
 def _has_hard_pullback_risk(summary, event_types, settings=None):
@@ -768,6 +1013,108 @@ def _default_target_2(current_price, box_high):
         return round(box_high + (box_high - current_price), 2)
 
     return round(current_price * 1.03, 2)
+
+
+def _apply_volatility_level_adjustment(
+    summary,
+    current_price,
+    stop_loss,
+    target_1,
+    target_2,
+    settings=None,
+):
+    """Widen paper-validation anchors when intraday volatility is elevated."""
+    if current_price is None:
+        return stop_loss, target_1, target_2, None
+
+    vol = _volatility_context(summary)
+    level = _volatility_level(vol, settings=settings)
+    if level == "normal":
+        return stop_loss, target_1, target_2, None
+
+    multiplier = _to_float(_setting(
+        settings,
+        "SIGNAL_EXTREME_VOL_LEVEL_MULTIPLIER" if level == "extreme" else "SIGNAL_HIGH_VOL_LEVEL_MULTIPLIER",
+        SIGNAL_EXTREME_VOL_LEVEL_MULTIPLIER if level == "extreme" else SIGNAL_HIGH_VOL_LEVEL_MULTIPLIER,
+    )) or 1.0
+
+    stop_loss = _widen_downside_level(current_price, stop_loss, multiplier)
+    target_1 = _widen_upside_level(current_price, target_1, multiplier)
+    target_2 = _widen_upside_level(current_price, target_2, multiplier)
+    note = (
+        "High-volatility session widened paper validation anchors "
+        "(level={}, atr_pct={}, bb_width_pct={}, multiplier={})."
+    ).format(
+        level,
+        _round_or_none(vol.get("atr_pct")),
+        _round_or_none(vol.get("bb_width_pct")),
+        multiplier,
+    )
+    return stop_loss, target_1, target_2, note
+
+
+def _widen_downside_level(current_price, level, multiplier):
+    fallback_distance_pct = 1.5
+    if level is not None and level < current_price:
+        distance_pct = (current_price - level) / current_price * 100.0
+    else:
+        distance_pct = fallback_distance_pct
+    adjusted_pct = max(distance_pct * multiplier, fallback_distance_pct * multiplier)
+    return round(current_price * (1 - adjusted_pct / 100.0), 2)
+
+
+def _widen_upside_level(current_price, level, multiplier):
+    fallback_distance_pct = 1.5
+    if level is not None and level > current_price:
+        distance_pct = (level - current_price) / current_price * 100.0
+    else:
+        distance_pct = fallback_distance_pct
+    adjusted_pct = max(distance_pct * multiplier, fallback_distance_pct * multiplier)
+    return round(current_price * (1 + adjusted_pct / 100.0), 2)
+
+
+def _volatility_context(summary):
+    atr_values = []
+    bb_width_values = []
+    for timeframe in (summary.get("timeframes") or {}).values():
+        volatility = timeframe.get("volatility") or {}
+        atr = _to_float(volatility.get("atr14_pct"))
+        bb_width = _to_float(volatility.get("bb_width_pct"))
+        if atr is not None:
+            atr_values.append(atr)
+        if bb_width is not None:
+            bb_width_values.append(bb_width)
+    return {
+        "atr_pct": max(atr_values) if atr_values else None,
+        "bb_width_pct": max(bb_width_values) if bb_width_values else None,
+    }
+
+
+def _volatility_level(volatility, settings=None):
+    atr_pct = volatility.get("atr_pct")
+    bb_width_pct = volatility.get("bb_width_pct")
+    extreme_atr = _to_float(_setting(settings, "SIGNAL_EXTREME_VOL_ATR_PCT", SIGNAL_EXTREME_VOL_ATR_PCT))
+    high_atr = _to_float(_setting(settings, "SIGNAL_HIGH_VOL_ATR_PCT", SIGNAL_HIGH_VOL_ATR_PCT))
+    extreme_bb = _to_float(_setting(settings, "SIGNAL_EXTREME_VOL_BB_WIDTH_PCT", SIGNAL_EXTREME_VOL_BB_WIDTH_PCT))
+    high_bb = _to_float(_setting(settings, "SIGNAL_HIGH_VOL_BB_WIDTH_PCT", SIGNAL_HIGH_VOL_BB_WIDTH_PCT))
+
+    if (
+        (atr_pct is not None and extreme_atr is not None and atr_pct >= extreme_atr)
+        or (bb_width_pct is not None and extreme_bb is not None and bb_width_pct >= extreme_bb)
+    ):
+        return "extreme"
+    if (
+        (atr_pct is not None and high_atr is not None and atr_pct >= high_atr)
+        or (bb_width_pct is not None and high_bb is not None and bb_width_pct >= high_bb)
+    ):
+        return "high"
+    return "normal"
+
+
+def _round_or_none(value):
+    if value is None:
+        return None
+    return round(value, 3)
 
 
 def _to_float(value):

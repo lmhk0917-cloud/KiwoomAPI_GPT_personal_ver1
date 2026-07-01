@@ -341,6 +341,14 @@ class RealtimeStrategyApp:
         return True
 
     def _maybe_export_shared_context(self, reason, force=False):
+        if (
+            reason == "intraday_cycle_no_gpt"
+            and not force
+            and os.environ.get("KIWOOM_SHARED_CONTEXT_EXPORT_ON_NO_GPT", "").lower() not in ("1", "true", "yes")
+        ):
+            print("KIWOOM_SHARED_CONTEXT_AUTO_EXPORT_SKIPPED=no_gpt_cycle_disabled")
+            return False
+
         now = datetime.now()
         cooldown_sec = int(os.environ.get("KIWOOM_SHARED_CONTEXT_EXPORT_COOLDOWN_SEC", "300"))
         if (

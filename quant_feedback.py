@@ -29,6 +29,8 @@ LONG_ACTIONS = set((
     "WATCH_BREAKOUT",
     "WATCH_SUPPORT",
     "WATCH_MOMENTUM",
+    "VOL_EXPANSION_MOMENTUM",
+    "HIGH_VOL_REVERSAL_WATCH",
 ))
 
 CAUTION_ACTIONS = set((
@@ -37,6 +39,7 @@ CAUTION_ACTIONS = set((
     "AVOID_SUPPLY",
     "WATCH_RESISTANCE",
     "OBSERVE_EVENT",
+    "AVOID_VOLATILITY_TRAP",
 ))
 
 
@@ -271,6 +274,7 @@ def _build_guidance(overview, by_action, min_sample=5):
     avoid_actions = []
     prefer_actions = []
     watch_actions = []
+    missed_upside_actions = []
     for item in by_action:
         if (item.get("evaluated_count") or 0) < min_sample:
             continue
@@ -280,7 +284,17 @@ def _build_guidance(overview, by_action, min_sample=5):
         win60 = item.get("win_rate_60m_pct")
         pf60 = item.get("profit_factor_60m")
         stop = item.get("stop_loss_hit_rate_pct")
-        if net60 is not None and net60 > 0 and win60 is not None and win60 >= 50 and (pf60 or 0) >= 1:
+        side = _decision_side(action)
+        if (
+            side == "caution_or_avoid"
+            and net60 is not None
+            and net60 > 0
+            and win60 is not None
+            and win60 >= 50
+            and (pf60 or 0) >= 1
+        ):
+            missed_upside_actions.append(_action_guidance(action, item, "relax_avoid_or_require_trap_confirmation"))
+        elif net60 is not None and net60 > 0 and win60 is not None and win60 >= 50 and (pf60 or 0) >= 1:
             prefer_actions.append(_action_guidance(action, item, "prefer_when_live_setup_matches"))
         elif (
             (net60 is not None and net60 < 0)
@@ -307,8 +321,9 @@ def _build_guidance(overview, by_action, min_sample=5):
         "cost_pct": ROUND_TRIP_COST_PCT,
         "avoid_actions": avoid_actions[:5],
         "prefer_actions": prefer_actions[:3],
+        "missed_upside_actions": missed_upside_actions[:5],
         "watch_actions": watch_actions[:3],
-        "summary": _guidance_summary(label, avoid_actions, prefer_actions),
+        "summary": _guidance_summary(label, avoid_actions, prefer_actions, missed_upside_actions),
     }
 
 
@@ -324,7 +339,10 @@ def _action_guidance(action, item, adjustment):
     }
 
 
-def _guidance_summary(label, avoid_actions, prefer_actions):
+def _guidance_summary(label, avoid_actions, prefer_actions, missed_upside_actions=None):
+    missed_upside_actions = missed_upside_actions or []
+    if missed_upside_actions:
+        return "Some caution/avoid labels missed upside; require stronger trap confirmation before avoidance."
     if label == "negative_expectancy":
         return "Recent evaluated signals have negative net expectancy; require stronger confirmation."
     if label == "positive_expectancy":

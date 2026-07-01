@@ -90,6 +90,79 @@ class BackfillQuantSignalScoresTests(unittest.TestCase):
         self.assertEqual(1, result["inserted"])
         self.assertEqual(0, count)
 
+    def test_refresh_existing_updates_without_duplicate_rows(self):
+        signal_id = self.store.save_signal_log(
+            signal={
+                "action_hint": "WATCH_PULLBACK",
+                "confidence_score": 70,
+                "risk_level": "medium",
+                "current_price": 100,
+                "stop_loss": 99,
+                "target_1": 101,
+                "target_2": 102,
+                "reasons": ["test"],
+            },
+            summary={
+                "code": "000660",
+                "events": [],
+                "historical_signal_stats": {
+                    "learning_feedback": {
+                        "quant_snapshot": {
+                            "by_action": [{
+                                "action_hint": "WATCH_PULLBACK",
+                                "evaluated_60m_count": 25,
+                                "avg_net_return_60m_pct": -0.4,
+                                "win_rate_60m_pct": 40,
+                                "directional_success_60m_pct": 40,
+                                "stop_loss_hit_rate_pct": 55,
+                            }],
+                        }
+                    }
+                },
+                "timeframes": {},
+            },
+            detected_at="2026-06-22 10:00:00.000000",
+        )
+        self.store.conn.execute("""
+            INSERT INTO quant_signal_scores (
+                signal_id, scored_at, code, action_hint, quant_signal_score,
+                expected_value_score, market_risk_score, final_quant_score,
+                decision_side, feature_json, formula_version
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            signal_id,
+            "2026-06-22 10:00:00.000000",
+            "000660",
+            "WATCH_PULLBACK",
+            1,
+            1,
+            1,
+            1,
+            "long_candidate",
+            "{}",
+            "old",
+        ))
+        self.store.conn.commit()
+
+        result = backfill_quant_signal_scores(
+            conn=self.store.conn,
+            store=self.store,
+            days=30,
+            refresh_existing=True,
+        )
+
+        rows = self.store.conn.execute(
+            "SELECT formula_version, feature_json FROM quant_signal_scores WHERE signal_id = ?",
+            (signal_id,),
+        ).fetchall()
+        self.assertEqual(1, result["candidates"])
+        self.assertEqual(0, result["inserted"])
+        self.assertEqual(1, result["updated"])
+        self.assertEqual(1, len(rows))
+        self.assertEqual("quant_signal_score_v2", rows[0]["formula_version"])
+        self.assertIn("long_score", rows[0]["feature_json"])
+
 
 if __name__ == "__main__":
     unittest.main()

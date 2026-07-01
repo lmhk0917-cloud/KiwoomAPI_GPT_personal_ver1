@@ -92,10 +92,45 @@ class QuantFeedbackTests(unittest.TestCase):
         self.assertEqual(latest["scope"], "code")
         self.assertEqual(latest["code"], "005930")
 
-    def _save_signal(self, index):
+    def test_caution_action_positive_return_is_missed_upside_not_prefer(self):
+        for index, return_60m in enumerate([0.8, 0.7, 0.6], start=1):
+            signal_id = self._save_signal(index, action_hint="AVOID_DOWNTREND")
+            self.store.save_paper_trade_result({
+                "signal_id": signal_id,
+                "evaluated_at": "2026-06-22 11:{:02d}:00.000000".format(index),
+                "code": "005930",
+                "entry_time": "2026-06-22 10:{:02d}:00.000000".format(index),
+                "entry_price": 100.0,
+                "return_5m_pct": return_60m / 4,
+                "return_10m_pct": return_60m / 3,
+                "return_30m_pct": return_60m / 2,
+                "return_60m_pct": return_60m,
+                "max_gain_30m_pct": return_60m / 2,
+                "max_loss_30m_pct": 0.0,
+                "max_gain_60m_pct": return_60m,
+                "max_loss_60m_pct": 0.0,
+                "target_1_hit": True,
+                "target_2_hit": False,
+                "stop_loss_hit": False,
+                "outcome_label": "target_1_before_stop",
+            })
+
+        snapshot = build_feedback_snapshot(
+            conn=self.store.conn,
+            days=30,
+            min_sample=3,
+            code="005930",
+        )
+
+        guidance = snapshot["guidance"]
+        self.assertEqual([], guidance["prefer_actions"])
+        self.assertEqual("AVOID_DOWNTREND", guidance["missed_upside_actions"][0]["action_hint"])
+        self.assertIn("missed upside", guidance["summary"])
+
+    def _save_signal(self, index, action_hint="WATCH_SUPPORT"):
         return self.store.save_signal_log(
             signal={
-                "action_hint": "WATCH_SUPPORT",
+                "action_hint": action_hint,
                 "confidence_score": 60,
                 "risk_level": "medium",
                 "current_price": 100.0,

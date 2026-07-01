@@ -187,7 +187,7 @@ th {{ color:#344054; font-size:12px; background:#f9fafb; }}
   <section><h2>Paper Feedback</h2><table><thead><tr><th>Created</th><th>Symbol</th><th class="num">Horizon</th><th class="num">Anchor</th><th>Status</th><th class="num">Return</th><th class="num">Max</th><th class="num">Min</th><th>Outcome</th></tr></thead><tbody>{paper_html}</tbody></table></section>
   <section><h2>Horizon Summary</h2><table><thead><tr><th class="num">Min</th><th class="num">Evaluated</th><th class="num">Avg</th><th class="num">Net</th><th class="num">Win</th><th class="num">Best</th><th class="num">Worst</th></tr></thead><tbody>{horizon_html}</tbody></table></section>
   <section><h2>Target Exit Scenarios</h2><table><thead><tr><th class="num">Min</th><th class="num">Target</th><th class="num">Stop</th><th class="num">Evaluated</th><th class="num">Target First</th><th class="num">Stop First</th><th class="num">Timeout</th><th class="num">Win</th><th class="num">Net</th></tr></thead><tbody>{target_exit_html}</tbody></table></section>
-  <section><h2>Quant / GPT / Paper</h2><table><thead><tr><th>Time</th><th>Symbol</th><th>Action</th><th class="num">Quant</th><th class="num">EV</th><th class="num">Risk</th><th>GPT</th><th class="num">GPT Conf</th><th class="num">GPT Risk</th><th class="num">Ret60</th><th>Outcome</th></tr></thead><tbody>{score_html}</tbody></table></section>
+  <section><h2>Quant / GPT / Paper</h2><table><thead><tr><th>Time</th><th>Symbol</th><th>Action</th><th class="num">Quant</th><th class="num">Long</th><th class="num">Caution</th><th>Conf</th><th class="num">EV</th><th class="num">Risk</th><th>GPT</th><th class="num">Ret60</th><th>Outcome</th></tr></thead><tbody>{score_html}</tbody></table></section>
   <section><h2>Quant Feedback</h2><table><thead><tr><th>Created</th><th>Scope</th><th>Symbol</th><th>Label</th><th class="num">Signals</th><th class="num">Evaluated</th><th class="num">Win</th><th class="num">Net60</th><th class="num">PF</th><th>Action</th></tr></thead><tbody>{quant_feedback_html}</tbody></table></section>
   <section><h2>Context</h2><table><thead><tr><th>Time</th><th>Scope</th><th>Symbol</th><th>Section</th><th>Reliability</th><th>Summary</th></tr></thead><tbody>{context_html}</tbody></table></section>
   <section><h2>Tables</h2><table><tbody>{table_html}</tbody></table></section>
@@ -361,7 +361,7 @@ class KiwoomFocusedDashboard(object):
         self.runtime_score_compare_tree = self._add_runtime_table(
             runtime_frame,
             "Quant / GPT / Paper",
-            ("time", "symbol", "action", "quant", "ev", "risk", "gpt", "gpt_conf", "gpt_risk", "ret60", "outcome"),
+            ("time", "symbol", "action", "quant", "long", "caution", "conf", "ev", "risk", "gpt", "ret60", "outcome"),
         )
         self.runtime_quant_feedback_tree = self._add_runtime_table(
             runtime_frame,
@@ -715,11 +715,12 @@ class KiwoomFocusedDashboard(object):
                 row.get("code"),
                 row.get("action_hint"),
                 _fmt(row.get("final_quant_score"), 1),
+                _fmt(row.get("long_score"), 1),
+                _fmt(row.get("caution_score"), 1),
+                row.get("score_confidence") or "",
                 _fmt(row.get("expected_value_score"), 1),
                 _fmt(row.get("market_risk_score"), 1),
                 row.get("gpt_decision") or "-",
-                _fmt(row.get("gpt_confidence"), 1),
-                _fmt(row.get("gpt_risk_score"), 1),
                 _fmt(row.get("return_60m_pct"), 4, signed=True),
                 row.get("outcome_label") or "",
             ))
@@ -1257,11 +1258,24 @@ def _recent_signal_scores(conn, code=None, limit=12):
 
 def _horizon_summary(conn, code=None, days=5):
     since = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S.%f")
+    rows = _horizon_summary_rows(conn, code=code, since=since)
+    if any((row.get("evaluated_count") or 0) for row in rows):
+        return rows
+    return _horizon_summary_rows(conn, code=code, since=None)
+
+
+def _horizon_summary_rows(conn, code=None, since=None):
     code_filter = ""
-    params_tail = [since]
+    time_filter = ""
+    params_tail = []
+    if since:
+        time_filter = "q.scored_at >= ?"
+        params_tail.append(since)
     if code:
-        code_filter = "AND q.code = ?"
+        code_filter = "q.code = ?"
         params_tail.append(code)
+    filters = [item for item in (time_filter, code_filter) if item]
+    where_sql = "WHERE " + " AND ".join(filters) if filters else ""
 
     rows = []
     for minutes in HORIZONS_MIN:
@@ -1280,9 +1294,8 @@ def _horizon_summary(conn, code=None, days=5):
                 FROM quant_signal_scores q
                 LEFT JOIN paper_trade_results p
                     ON p.signal_id = q.signal_id
-                WHERE q.scored_at >= ?
-                {code_filter}
-            """.format(column=column, code_filter=code_filter), [minutes, ROUND_TRIP_COST_PCT] + params_tail).fetchone()
+                {where_sql}
+            """.format(column=column, where_sql=where_sql), [minutes, ROUND_TRIP_COST_PCT] + params_tail).fetchone()
         except sqlite3.Error:
             row = None
         if row:
@@ -1292,11 +1305,22 @@ def _horizon_summary(conn, code=None, days=5):
 
 def _recent_score_compare(conn, code=None, limit=30, days=5):
     since = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S.%f")
-    where = "WHERE q.scored_at >= ?"
-    params = [since]
+    rows = _recent_score_compare_rows(conn, code=code, limit=limit, since=since)
+    if rows:
+        return rows
+    return _recent_score_compare_rows(conn, code=code, limit=limit, since=None)
+
+
+def _recent_score_compare_rows(conn, code=None, limit=30, since=None):
+    filters = []
+    params = []
+    if since:
+        filters.append("q.scored_at >= ?")
+        params.append(since)
     if code:
-        where += " AND q.code = ?"
+        filters.append("q.code = ?")
         params.append(code)
+    where = "WHERE " + " AND ".join(filters) if filters else ""
     params.append(int(limit))
     try:
         rows = conn.execute("""
@@ -1307,25 +1331,56 @@ def _recent_score_compare(conn, code=None, limit=30, days=5):
                 q.final_quant_score,
                 q.expected_value_score,
                 q.market_risk_score,
-                g.decision AS gpt_decision,
-                g.confidence AS gpt_confidence,
-                g.risk_score AS gpt_risk_score,
+                q.feature_json,
+                (
+                    SELECT g.decision
+                    FROM gpt_analysis_scores g
+                    WHERE g.code = q.code
+                      AND g.analyzed_at >= q.scored_at
+                      AND g.analyzed_at <= datetime(q.scored_at, '+5 minutes')
+                    ORDER BY g.analyzed_at ASC, g.id ASC
+                    LIMIT 1
+                ) AS gpt_decision,
+                (
+                    SELECT g.confidence
+                    FROM gpt_analysis_scores g
+                    WHERE g.code = q.code
+                      AND g.analyzed_at >= q.scored_at
+                      AND g.analyzed_at <= datetime(q.scored_at, '+5 minutes')
+                    ORDER BY g.analyzed_at ASC, g.id ASC
+                    LIMIT 1
+                ) AS gpt_confidence,
+                (
+                    SELECT g.risk_score
+                    FROM gpt_analysis_scores g
+                    WHERE g.code = q.code
+                      AND g.analyzed_at >= q.scored_at
+                      AND g.analyzed_at <= datetime(q.scored_at, '+5 minutes')
+                    ORDER BY g.analyzed_at ASC, g.id ASC
+                    LIMIT 1
+                ) AS gpt_risk_score,
                 p.return_60m_pct,
                 p.outcome_label
             FROM quant_signal_scores q
             LEFT JOIN paper_trade_results p
                 ON p.signal_id = q.signal_id
-            LEFT JOIN gpt_analysis_scores g
-                ON g.code = q.code
-               AND g.analyzed_at >= q.scored_at
-               AND g.analyzed_at <= datetime(q.scored_at, '+5 minutes')
             {where}
             ORDER BY q.scored_at DESC, q.id DESC
             LIMIT ?
         """.format(where=where), params).fetchall()
     except sqlite3.Error:
         return []
-    return [dict(row) for row in rows]
+    return [_score_compare_view_row(row) for row in rows]
+
+
+def _score_compare_view_row(row):
+    item = dict(row)
+    feature = _load_json(item.get("feature_json"))
+    item["long_score"] = feature.get("long_score")
+    item["caution_score"] = feature.get("caution_score")
+    item["score_confidence"] = feature.get("score_confidence")
+    item.pop("feature_json", None)
+    return item
 
 
 def _recent_quant_feedback(conn, code=None, limit=30):
@@ -1481,16 +1536,17 @@ def _paper_html(row):
 
 
 def _score_compare_html(row):
-    return """<tr><td>{}</td><td>{}</td><td>{}</td><td class="num">{}</td><td class="num">{}</td><td class="num">{}</td><td>{}</td><td class="num">{}</td><td class="num">{}</td><td class="num {}">{}</td><td>{}</td></tr>""".format(
+    return """<tr><td>{}</td><td>{}</td><td>{}</td><td class="num">{}</td><td class="num">{}</td><td class="num">{}</td><td>{}</td><td class="num">{}</td><td class="num">{}</td><td>{}</td><td class="num {}">{}</td><td>{}</td></tr>""".format(
         _e(row.get("scored_at")),
         _e(row.get("code")),
         _e(row.get("action_hint")),
         _fmt(row.get("final_quant_score"), 1),
+        _fmt(row.get("long_score"), 1),
+        _fmt(row.get("caution_score"), 1),
+        _e(row.get("score_confidence") or ""),
         _fmt(row.get("expected_value_score"), 1),
         _fmt(row.get("market_risk_score"), 1),
         _e(row.get("gpt_decision") or "-"),
-        _fmt(row.get("gpt_confidence"), 1),
-        _fmt(row.get("gpt_risk_score"), 1),
         _num_class(row.get("return_60m_pct")),
         _fmt(row.get("return_60m_pct"), 4, signed=True),
         _e(row.get("outcome_label") or ""),

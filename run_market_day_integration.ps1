@@ -4,7 +4,7 @@ param(
   [string]$CondaEnv = "py37_32",
   [string]$MarketOpen = "09:00",
   [string]$MarketClose = "15:31",
-  [int]$LoginCheckSeconds = 45,
+  [int]$LoginCheckSeconds = 180,
   [string]$OpenApiTaskName = "",
   [int]$OpenApiTaskWaitSeconds = 60,
   [int]$MaxRestarts = 3,

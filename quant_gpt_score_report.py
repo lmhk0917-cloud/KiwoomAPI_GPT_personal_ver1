@@ -51,8 +51,24 @@ def build_report(conn, days=5, code=None, limit=20):
             COUNT(1) AS quant_count,
             ROUND(AVG(q.final_quant_score), 3) AS avg_final_quant_score,
             ROUND(AVG(q.expected_value_score), 3) AS avg_expected_value_score,
-            ROUND(AVG(g.confidence), 3) AS avg_gpt_confidence,
-            ROUND(AVG(g.risk_score), 3) AS avg_gpt_risk_score,
+            ROUND(AVG((
+                SELECT g.confidence
+                FROM gpt_analysis_scores g
+                WHERE g.code = q.code
+                  AND g.analyzed_at >= q.scored_at
+                  AND g.analyzed_at <= datetime(q.scored_at, '+5 minutes')
+                ORDER BY g.analyzed_at ASC, g.id ASC
+                LIMIT 1
+            )), 3) AS avg_gpt_confidence,
+            ROUND(AVG((
+                SELECT g.risk_score
+                FROM gpt_analysis_scores g
+                WHERE g.code = q.code
+                  AND g.analyzed_at >= q.scored_at
+                  AND g.analyzed_at <= datetime(q.scored_at, '+5 minutes')
+                ORDER BY g.analyzed_at ASC, g.id ASC
+                LIMIT 1
+            )), 3) AS avg_gpt_risk_score,
             ROUND(AVG(p.return_60m_pct), 3) AS avg_return_60m_pct,
             ROUND(AVG(p.return_60m_pct - {cost}), 3) AS avg_net_return_60m_pct,
             SUM(CASE WHEN p.return_60m_pct > 0 THEN 1 ELSE 0 END) AS positive_60m_count,
@@ -60,10 +76,6 @@ def build_report(conn, days=5, code=None, limit=20):
         FROM quant_signal_scores q
         LEFT JOIN paper_trade_results p
             ON p.signal_id = q.signal_id
-        LEFT JOIN gpt_analysis_scores g
-            ON g.code = q.code
-           AND g.analyzed_at >= q.scored_at
-           AND g.analyzed_at <= datetime(q.scored_at, '+5 minutes')
         WHERE q.scored_at >= ?
         {code_filter}
     """.format(code_filter=code_filter, cost=ROUND_TRIP_COST_PCT), params).fetchone()
@@ -119,20 +131,49 @@ def build_report(conn, days=5, code=None, limit=20):
             q.final_quant_score,
             q.expected_value_score,
             q.market_risk_score,
-            g.decision AS gpt_decision,
-            g.confidence AS gpt_confidence,
-            g.risk_score AS gpt_risk_score,
-            g.parse_status AS gpt_parse_status,
+            q.feature_json,
+            (
+                SELECT g.decision
+                FROM gpt_analysis_scores g
+                WHERE g.code = q.code
+                  AND g.analyzed_at >= q.scored_at
+                  AND g.analyzed_at <= datetime(q.scored_at, '+5 minutes')
+                ORDER BY g.analyzed_at ASC, g.id ASC
+                LIMIT 1
+            ) AS gpt_decision,
+            (
+                SELECT g.confidence
+                FROM gpt_analysis_scores g
+                WHERE g.code = q.code
+                  AND g.analyzed_at >= q.scored_at
+                  AND g.analyzed_at <= datetime(q.scored_at, '+5 minutes')
+                ORDER BY g.analyzed_at ASC, g.id ASC
+                LIMIT 1
+            ) AS gpt_confidence,
+            (
+                SELECT g.risk_score
+                FROM gpt_analysis_scores g
+                WHERE g.code = q.code
+                  AND g.analyzed_at >= q.scored_at
+                  AND g.analyzed_at <= datetime(q.scored_at, '+5 minutes')
+                ORDER BY g.analyzed_at ASC, g.id ASC
+                LIMIT 1
+            ) AS gpt_risk_score,
+            (
+                SELECT g.parse_status
+                FROM gpt_analysis_scores g
+                WHERE g.code = q.code
+                  AND g.analyzed_at >= q.scored_at
+                  AND g.analyzed_at <= datetime(q.scored_at, '+5 minutes')
+                ORDER BY g.analyzed_at ASC, g.id ASC
+                LIMIT 1
+            ) AS gpt_parse_status,
             p.return_30m_pct,
             p.return_60m_pct,
             p.outcome_label
         FROM quant_signal_scores q
         LEFT JOIN paper_trade_results p
             ON p.signal_id = q.signal_id
-        LEFT JOIN gpt_analysis_scores g
-            ON g.code = q.code
-           AND g.analyzed_at >= q.scored_at
-           AND g.analyzed_at <= datetime(q.scored_at, '+5 minutes')
         WHERE q.scored_at >= ?
         {code_filter}
         ORDER BY q.scored_at DESC, q.id DESC
@@ -147,7 +188,7 @@ def build_report(conn, days=5, code=None, limit=20):
         "horizon_summary": horizon_summary,
         "target_exit_scenarios": build_target_exit_scenarios(conn, days=days, code=code),
         "by_action": [_row(row) for row in by_action],
-        "recent": [_row(row) for row in recent],
+        "recent": [_score_row(row) for row in recent],
     }
 
 
@@ -176,6 +217,25 @@ def _row(row):
     if row is None:
         return {}
     return {key: row[key] for key in row.keys()}
+
+
+def _score_row(row):
+    item = _row(row)
+    feature = _load_json(item.get("feature_json"))
+    item["long_score"] = feature.get("long_score")
+    item["caution_score"] = feature.get("caution_score")
+    item["score_confidence"] = feature.get("score_confidence")
+    item.pop("feature_json", None)
+    return item
+
+
+def _load_json(value):
+    if not value:
+        return {}
+    try:
+        return json.loads(value)
+    except (TypeError, ValueError):
+        return {}
 
 
 if __name__ == "__main__":
